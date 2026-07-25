@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+dist/
+
+# 环境配置
+.env
+.env.local
+
+# 训练数据集 (太大)
+dataset/
+input/
+
+# 训练产物
+runs/
+yolo26n.pt
+
+# 模型 (2.9MB，保留提交)
+# models/*.pt  ← 已移除这个规则
+
+# 采集的图片
+data/images/
+
+# 日志
+logs/
+
+# NapCatQQ (排除二进件，仅留配置)
+tools/NapCatQQ/*
+!tools/NapCatQQ/config/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store

@@ -1,0 +1,46 @@
+{
+  "network": {
+    "httpServers": [],
+    "httpSseServers": [],
+    "httpClients": [],
+    "websocketServers": [
+      {
+        "enable": false,
+        "name": "QQChatRobot_obtain_classify_picture",
+        "host": "127.0.0.1",
+        "port": 3001,
+        "reportSelfMessage": false,
+        "enableForcePushEvent": true,
+        "messagePostFormat": "array",
+        "token": "D0dmwyvLEB8-a8E0",
+        "debug": false,
+        "heartInterval": 30000
+      }
+    ],
+    "websocketClients": [
+      {
+        "enable": true,
+        "name": "QQChatRobot_obtain_classify_picture1",
+        "url": "ws://127.0.0.1:8080/onebot/v11/ws",
+        "reportSelfMessage": false,
+        "messagePostFormat": "array",
+        "token": "RR6eNjgPDlT2fFeO",
+        "debug": false,
+        "heartInterval": 15000,
+        "reconnectInterval": 5000,
+        "verifyCertificate": true
+      }
+    ],
+    "plugins": []
+  },
+  "musicSignUrl": "",
+  "enableLocalFile2Url": false,
+  "parseMultMsg": false,
+  "imageDownloadProxy": "",
+  "timeout": {
+    "baseTimeout": 10000,
+    "uploadSpeedKBps": 256,
+    "downloadSpeedKBps": 256,
+    "maxTimeout": 1800000
+  }
+}
