@@ -14,31 +14,52 @@ QQ群 → NapCatQQ (QQ协议) ──WS──→ NoneBot2 → YOLOv8-cls → 本�
 
 - Windows 10/11
 - Python 3.10+
-- NVIDIA GPU (CUDA 12.0+)
+- QQ NT (9.9.26+) 已安装
+- NVIDIA GPU (CUDA 12.0+) / 或 CPU (修改 .env 中 USE_GPU=false)
 - QQ 小号
 
 ## 快速开始
 
-### 1. 配置自动登录
+### 1. 获取 NapCatQQ
 
-编辑 `tools\NapCatQQ\config\webui.json`，设置你的 QQ 号：
+从 [NapCatQQ Releases](https://github.com/NapNeko/NapCatQQ/releases) 下载 `NapCat.Shell.zip`（v4.18.13+），解压到 `tools/NapCatQQ/`。
 
-```json
-"autoLoginAccount": "你的QQ号"
+```bash
+# 目录结构应如下
+tools/NapCatQQ/
+├── launcher-user.bat
+├── NapCatWinBootMain.exe
+├── NapCatWinBootHook.dll
+├── napcat.mjs
+└── ...
 ```
 
-> 首次运行需在 NapCatQQ WebUI (http://127.0.0.1:6099) 中手动扫码登录一次，之后自动使用缓存凭据快速登录。
+> 电脑需已安装 QQ NT (9.9.26+)。双击 `launcher-user.bat` 可手动启动测试。
 
-### 2. 配置 .env
+### 2. 创建配置文件
 
-编辑 `.env` 文件：
+```bash
+# 从模板创建
+copy .env.example .env
+```
+
+编辑 `.env`，填入你的信息：
 
 ```env
-# 要监听的群号（JSON 数组）
+SUPERUSERS=["你的QQ号"]
 TARGET_GROUPS=[群号1, 群号2]
-# OneBot 鉴权 Token（需与 NapCatQQ OneBot 配置一致）
-ONEBOT_ACCESS_TOKEN=******
+ONEBOT_ACCESS_TOKEN=你的Token
 ```
+
+### 3. 配置 NapCatQQ OneBot
+
+首次启动 NapCatQQ 后，打开 WebUI `http://127.0.0.1:6099`：
+
+1. 扫码登录 QQ 小号
+2. 网络配置 → 添加 WebSocket 客户端：
+   - URL: `ws://127.0.0.1:8080/onebot/v11/ws`
+   - Token: 与 `.env` 中 `ONEBOT_ACCESS_TOKEN` 一致
+3. 在 `webui.json` 中设置 `autoLoginAccount` 实现自动登录
 
 ### 3. 一键启动（守护模式）
 
