@@ -35,9 +35,9 @@ QQ群 → NapCatQQ (QQ协议) ──WS──→ NoneBot2 → YOLOv8-cls → 本�
 
 ```env
 # 要监听的群号（JSON 数组）
-TARGET_GROUPS=[737130031, 1079534054]
+TARGET_GROUPS=[群号1, 群号2]
 # OneBot 鉴权 Token（需与 NapCatQQ OneBot 配置一致）
-ONEBOT_ACCESS_TOKEN=RR6eNjgPDlT2fFeO
+ONEBOT_ACCESS_TOKEN=******
 ```
 
 ### 3. 一键启动（守护模式）
@@ -124,10 +124,10 @@ NapCatQQ 使用**反向 WebSocket** 模式连接到 NoneBot2：
 
 ```json
 {
-  "autoLoginAccount": "3412571395",
+  "autoLoginAccount": "机器人账号",
   "host": "::",
   "port": 6099,
-  "token": "0765bd65647d"
+  "token": "自己的令牌"
 }
 ```
 
@@ -139,7 +139,7 @@ NapCatQQ 使用**反向 WebSocket** 模式连接到 NoneBot2：
     "websocketClients": [{
       "enable": true,
       "url": "ws://127.0.0.1:8080/onebot/v11/ws",
-      "token": "RR6eNjgPDlT2fFeO",
+      "token": "******",
       "heartInterval": 15000,
       "reconnectInterval": 5000
     }]

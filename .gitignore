@@ -26,9 +26,8 @@ data/images/
 # 日志
 logs/
 
-# NapCatQQ (排除二进件，仅留配置)
-tools/NapCatQQ/*
-!tools/NapCatQQ/config/
+# NapCatQQ (含账号信息的 config 不提交，仅保留示例)
+tools/NapCatQQ/
 
 # IDE
 .vscode/
