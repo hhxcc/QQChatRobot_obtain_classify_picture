@@ -61,7 +61,7 @@ ONEBOT_ACCESS_TOKEN=你的Token
    - Token: 与 `.env` 中 `ONEBOT_ACCESS_TOKEN` 一致
 3. 在 `webui.json` 中设置 `autoLoginAccount` 实现自动登录
 
-### 3. 一键启动（守护模式）
+### 4. 一键启动（守护模式）
 
 ```bash
 # 双击运行，自动启动 NapCatQQ + Bot，崩溃自动重启

@@ -29,6 +29,10 @@ logs/
 # NapCatQQ (含账号信息的 config 不提交，仅保留示例)
 tools/NapCatQQ/
 
+# 根目录残留文件 (正确位置在 tools/ 和 models/)
+loadNapCat.js
+/yolov8n-cls.pt
+
 # IDE
 .vscode/
 .idea/
