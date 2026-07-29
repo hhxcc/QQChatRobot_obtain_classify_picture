@@ -7,11 +7,10 @@
 4. 断线/掉线自动退出，由守护脚本重启
 """
 import asyncio
-import sys
+import os
 from nonebot import get_driver, logger, get_bot, on_notice
 from nonebot.adapters.onebot.v11 import Bot, NoticeEvent
 from nonebot.plugin import PluginMetadata
-from nonebot.rule import Rule
 
 __plugin_meta__ = PluginMetadata(
     name="看门狗",
@@ -24,43 +23,58 @@ _heartbeat_task: asyncio.Task | None = None
 _offline_detected: bool = False
 
 
-# ── 监听 QQ 登录态失效 ──
-def is_bot_offline(event: NoticeEvent) -> bool:
-    return event.notice_type == "bot_offline"
-
-
-bot_offline = on_notice(rule=Rule(is_bot_offline), block=False)
+# ── 监听所有通知事件，从中过滤 QQ 登录态失效 ──
+bot_offline = on_notice(block=False)
 
 
 @bot_offline.handle()
 async def handle_bot_offline(event: NoticeEvent):
-    """QQ 账号登录失效（被挤下线/登录过期）"""
+    """捕获所有 notice 事件，只处理 bot_offline"""
     global _offline_detected
+
+    if event.notice_type != "bot_offline":
+        return
+
     _offline_detected = True
     extra = event.dict(exclude={"time", "self_id", "post_type", "notice_type"})
     logger.critical(
         f"🚨 QQ 账号 {event.self_id} 登录已失效！详情: {extra}"
     )
-    logger.critical("⏳ 5 秒后退出 Bot 进程，由 start_bot.bat 守护脚本重启...")
-    await asyncio.sleep(5)
-    sys.exit(1)
+    logger.critical("⏳ 3 秒后退出进程，由 start_bot.bat 守护脚本重启...")
+    await asyncio.sleep(3)
+    os._exit(1)
 
 
 # ── 定时心跳 ──
 async def _heartbeat_loop():
-    """每 5 分钟发送一次心跳检查，保持连接活跃"""
-    await asyncio.sleep(60)
+    """每 3 分钟发送心跳检查，保持连接活跃并检测 QQ 是否真正在线"""
+    await asyncio.sleep(30)
     while True:
         try:
             bot: Bot = get_bot()
             login_info = await bot.get_login_info()
-            logger.info(
-                f"💓 心跳正常 | QQ: {login_info.get('nickname', 'N/A')}"
-                f"({login_info.get('user_id', 'N/A')})"
-            )
+            nickname = login_info.get("nickname", "N/A")
+            uid = login_info.get("user_id", "N/A")
+
+            # 额外检测：调用 get_group_list 验证 QQ 协议层是否存活
+            try:
+                groups = await bot.get_group_list()
+                group_count = len(groups)
+            except Exception:
+                group_count = -1
+
+            if group_count < 0:
+                logger.error(
+                    f"💔 QQ 协议层无响应！WebSocket 连接正常但 QQ 可能已离线 | "
+                    f"QQ: {nickname}({uid})"
+                )
+            else:
+                logger.info(
+                    f"💓 心跳正常 | QQ: {nickname}({uid}) | 群数: {group_count}"
+                )
         except Exception as e:
             logger.error(f"💔 心跳检测失败，连接可能已断开: {e}")
-        await asyncio.sleep(300)
+        await asyncio.sleep(180)  # 每 3 分钟
 
 
 # ── WebSocket 连接事件 ──
@@ -81,6 +95,10 @@ async def on_bot_disconnect(bot: Bot):
     if _heartbeat_task and not _heartbeat_task.done():
         _heartbeat_task.cancel()
         _heartbeat_task = None
+    # Exit so start_bot.bat restarts the full chain (NapCat + bot)
+    logger.warning("⏳ WS 断开，3 秒后退出进程...")
+    await asyncio.sleep(3)
+    os._exit(1)
 
 
 @driver.on_startup
@@ -94,3 +112,58 @@ async def _():
     if _heartbeat_task and not _heartbeat_task.done():
         _heartbeat_task.cancel()
     logger.info("🛡️ 看门狗插件已关闭")
+
+
+# ── 诊断命令 + 自测命令（on_message 内部过滤）──
+from nonebot import on_message
+from nonebot.adapters.onebot.v11 import GroupMessageEvent
+
+status_cmd = on_message(block=False)
+
+
+@status_cmd.handle()
+async def status_cmd(bot: Bot, event: GroupMessageEvent):
+    """诊断机器人状态"""
+    text = str(event.get_plaintext()).strip()
+    if text not in (".status", "/status"):
+        return
+
+    try:
+        login_info = await bot.get_login_info()
+        nickname = login_info.get("nickname", "N/A")
+        uid = login_info.get("user_id", "N/A")
+    except Exception:
+        nickname, uid = "N/A", "N/A"
+
+    targets = getattr(driver.config, "target_groups", [])
+    heartbeat_status = "运行中" if _heartbeat_task and not _heartbeat_task.done() else "未启动"
+    msg = (
+        f"🤖 Bot 状态报告\n"
+        f"QQ: {nickname}({uid})\n"
+        f"监听群组: {targets if targets else '全部群'}\n"
+        f"心跳任务: {heartbeat_status}"
+    )
+    await bot.send(event=event, message=msg)
+
+
+test_cmd = on_message(block=False)
+
+
+@test_cmd.handle()
+async def test_offline_cmd(bot: Bot, event: GroupMessageEvent):
+    """模拟 bot_offline 通知，验证看门狗是否能检测"""
+    text = str(event.get_plaintext()).strip()
+    if text not in (".test_offline", "/test_offline"):
+        return
+
+    logger.warning("🧪 收到 test_offline 命令，模拟 bot_offline 事件...")
+    await bot.send(event=event, message="🧪 触发 bot_offline 事件，Bot 即将退出重启...")
+    await asyncio.sleep(1)
+    fake_event = NoticeEvent(
+        time=0,
+        self_id=int(bot.self_id),
+        post_type="notice",
+        notice_type="bot_offline",
+        user_id=int(bot.self_id),
+    )
+    await bot.handle_event(fake_event)
