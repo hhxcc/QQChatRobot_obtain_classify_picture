@@ -1,0 +1,32 @@
+# ============================================
+# 知识库全局配置 (用于构建索引与检索)
+# ============================================
+version: 1
+description: "QQ Bot 群聊知识库 - 支持 FTS5 + YAML frontmatter 双层检索"
+
+# 检索参数
+search:
+  top_k: 3          # 每次检索返回的最大匹配块数
+  min_score: 0.1    # 最低匹配分数阈值
+  max_chunk_chars: 500  # 单个知识块注入提示词的最大字符数
+
+# 主题目录（子目录名即主题，优先级用于排序）
+topics:
+  - name: 明日方舟
+    dir: 明日方舟
+    priority: 5
+  - name: 二次元常识
+    dir: 二次元常识
+    priority: 3
+  - name: 调酒知识
+    dir: 调酒知识
+    priority: 2
+
+# 知识文件格式说明（供爬虫参考）:
+# 每个 .txt/.md 文件以 YAML frontmatter 开头，以 --- 分隔正文
+# frontmatter 字段:
+#   title:    知识块标题（必填）
+#   topics:   所属主题标签列表（必填）
+#   keywords: 关键词列表，用于精准匹配（必填）
+#   priority: 优先级 1-10，越大越优先（可选，默认 5）
+# 正文：Markdown 格式，建议每段不超过 500 字

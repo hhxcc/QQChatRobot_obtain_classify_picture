@@ -34,3 +34,10 @@ torchvision==0.28.0
 ultralytics==8.4.104
 opencv-python-headless==5.0.0.93
 Pillow==12.2.0
+
+# --- LLM API ---
+openai>=1.0.0
+
+# --- 知识库检索 ---
+jieba>=0.42
+pyyaml>=6.0

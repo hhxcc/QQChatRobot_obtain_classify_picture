@@ -18,11 +18,14 @@ dependencies = [
     "torchvision>=0.15.0",
     "opencv-python-headless>=4.8.0",
     "Pillow>=10.0.0",
+    "openai>=1.0.0",
+    "jieba>=0.42",
+    "pyyaml>=6.0",
 ]
 
 [tool.nonebot]
 # NoneBot2 配置
 adapters = ["nonebot.adapters.onebot.v11"]
-plugins = ["src.plugins.image_classifier", "src.plugins.watchdog"]
+plugins = ["src.plugins.image_classifier", "src.plugins.watchdog", "src.plugins.llm_chat"]
 plugin_dirs = ["src/plugins"]
 builtin_plugins = ["echo"]

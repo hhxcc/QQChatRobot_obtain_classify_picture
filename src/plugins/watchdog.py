@@ -20,6 +20,7 @@ __plugin_meta__ = PluginMetadata(
 
 driver = get_driver()
 _heartbeat_task: asyncio.Task | None = None
+_exit_task: asyncio.Task | None = None
 _offline_detected: bool = False
 
 
@@ -81,8 +82,15 @@ async def _heartbeat_loop():
 @driver.on_bot_connect
 async def on_bot_connect(bot: Bot):
     logger.info(f"🔗 Bot 已连接: {bot.self_id}")
-    global _heartbeat_task, _offline_detected
+    global _heartbeat_task, _exit_task, _offline_detected
     _offline_detected = False
+
+    # 取消断连退出定时器（重连成功，不需要退出了）
+    if _exit_task and not _exit_task.done():
+        _exit_task.cancel()
+        _exit_task = None
+        logger.info("🔄 Bot 重连成功，已取消退出定时器")
+
     if _heartbeat_task and not _heartbeat_task.done():
         _heartbeat_task.cancel()
     _heartbeat_task = asyncio.create_task(_heartbeat_loop())
@@ -91,14 +99,29 @@ async def on_bot_connect(bot: Bot):
 @driver.on_bot_disconnect
 async def on_bot_disconnect(bot: Bot):
     logger.warning(f"🔌 Bot WebSocket 已断开: {bot.self_id}")
-    global _heartbeat_task
+    global _heartbeat_task, _exit_task
     if _heartbeat_task and not _heartbeat_task.done():
         _heartbeat_task.cancel()
         _heartbeat_task = None
-    # Exit so start_bot.bat restarts the full chain (NapCat + bot)
-    logger.warning("⏳ WS 断开，3 秒后退出进程...")
-    await asyncio.sleep(3)
-    os._exit(1)
+
+    # 不立即退出，给 NapCat 60 秒时间重连
+    # 如果 60 秒内重连成功，on_bot_connect 会取消此任务
+    if _exit_task and not _exit_task.done():
+        _exit_task.cancel()
+
+    async def delayed_exit():
+        await asyncio.sleep(60)
+        logger.critical("⏰ 60 秒内未重连，退出进程由 start_bot.bat 重启...")
+        # 两阶段退出：先尝试干净退出，再强制杀死
+        import sys
+        try:
+            sys.exit(1)
+        except SystemExit:
+            pass
+        os._exit(1)
+
+    _exit_task = asyncio.create_task(delayed_exit())
+    logger.warning("⏳ WS 断开，等待 60 秒重连，超时后退出...")
 
 
 @driver.on_startup
