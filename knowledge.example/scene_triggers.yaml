@@ -1,0 +1,12 @@
+# 场景触发映射模板
+# patterns: 触发关键词
+# context: 注入 LLM 的上下文
+# priority: 1-10
+
+scenes:
+  - name: 示例场景
+    patterns: [你好, 机器人]
+    context: |
+      【场景：群友在打招呼】
+      你是群聊助手，请友好回应。
+    priority: 5

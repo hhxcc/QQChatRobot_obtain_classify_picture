@@ -26,19 +26,21 @@ data/images/
 # 日志
 logs/
 
-修改方案/
-剧情/
-knowledge/
-output/
-人格提示词.txt
-
+# 工具 / NapCatQQ (含账号信息不提交)
 tools/
-# NapCatQQ (含账号信息的 config 不提交，仅保留示例)
-tools/NapCatQQ/
 
-# 根目录残留文件 (正确位置在 tools/ 和 models/)
+# LLM 聊天 - 人格/知识库 (个人偏好不公开)
+人格提示词.txt
+knowledge/
+剧情/
+修改方案/
+output/
+compare_index.py
+
+# 根目录残留
 loadNapCat.js
 /yolov8n-cls.pt
+/yolo26n.pt
 
 # IDE
 .vscode/

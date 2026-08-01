@@ -1,0 +1,10 @@
+---
+title: 示例知识条目
+keywords: [示例, 模板]
+priority: 5
+---
+
+这是知识库中的一条示例条目。
+
+在 knowledge/ 下创建你自己的主题目录和知识文件。
+每个 .txt 文件使用 YAML frontmatter 标记关键词和优先级。

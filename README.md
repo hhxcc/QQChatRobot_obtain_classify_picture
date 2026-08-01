@@ -109,6 +109,36 @@ QQ 登录失效
 
 在 QQ 群中发送 `.test_offline` 可模拟登录失效，验证看门狗是否能正常检测并触发重启。
 
+## LLM 聊天功能
+
+内置 LLM 插件，支持群聊自动回复。基于 DeepSeek API，可注入人格提示词和知识库。
+
+```
+群消息 → 场景检测 → 知识库检索 → DeepSeek API → 回复
+```
+
+### 初始化
+
+```bash
+# 1. 创建人格提示词
+copy 人格提示词.example.txt 人格提示词.txt
+# 编辑 人格提示词.txt 写入你的角色设定
+
+# 2. 创建知识库 (可选)
+mkdir knowledge
+# 参考 knowledge.example/ 目录结构
+```
+
+### 配置 .env
+
+```env
+DEEPSEEK_API_KEY=你的APIKey
+LLM_SYSTEM_PROMPT_FILE=人格提示词.txt
+LLM_TARGET_GROUPS=[群号1]
+```
+
+> 将 `LLM_TARGET_GROUPS` 设为 `[]` 可关闭 LLM 聊天功能。
+
 ## 训练动漫分类模型
 
 ```bash
