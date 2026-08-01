@@ -26,6 +26,13 @@ data/images/
 # 日志
 logs/
 
+修改方案/
+剧情/
+knowledge/
+output/
+人格提示词.txt
+
+tools/
 # NapCatQQ (含账号信息的 config 不提交，仅保留示例)
 tools/NapCatQQ/
 

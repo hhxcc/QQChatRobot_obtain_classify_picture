@@ -12,6 +12,7 @@ from nonebot.rule import Rule
 from .config import Config
 from .llm_client import LLMClient
 from .knowledge_store import KnowledgeStore
+from .scene_detector import SceneDetector
 
 
 # 获取全局配置
@@ -19,12 +20,19 @@ _driver = get_driver()
 _plugin_config: Config = Config()
 _llm_client: LLMClient | None = None
 _knowledge_store: KnowledgeStore | None = None
+_scene_detector: SceneDetector | None = None
 
 
 def _set_knowledge_store(store: KnowledgeStore | None):
     """由 __init__.py 在启动时注入知识库实例"""
     global _knowledge_store
     _knowledge_store = store
+
+
+def _set_scene_detector(detector: SceneDetector | None):
+    """由 __init__.py 在启动时注入场景检测器实例"""
+    global _scene_detector
+    _scene_detector = detector
 
 
 def _init_config(existing_config: Config | None = None):
@@ -135,6 +143,20 @@ async def _call_llm(group_id: int, history: deque) -> str | None:
                 logger.debug(
                     f"[LLM] 知识库命中 | group={group_id} | "
                     f"query={query[:40]}... | {len(chunks)} 块"
+                )
+
+        # ── 场景检测（P3）──
+        if _scene_detector and _scene_detector.is_ready:
+            scene_contexts = _scene_detector.detect(query)
+            if scene_contexts:
+                combined = "\n".join(scene_contexts)
+                messages.insert(
+                    0,
+                    {"role": "system", "content": combined},
+                )
+                logger.debug(
+                    f"[LLM] 场景命中 | group={group_id} | "
+                    f"{len(scene_contexts)} 个场景"
                 )
 
         reply = await asyncio.wait_for(

@@ -12,6 +12,9 @@ search:
 
 # 主题目录（子目录名即主题，优先级用于排序）
 topics:
+  - name: 角色记忆
+    dir: 明日方舟/角色记忆
+    priority: 8
   - name: 明日方舟
     dir: 明日方舟
     priority: 5

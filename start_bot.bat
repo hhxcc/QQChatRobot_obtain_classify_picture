@@ -11,7 +11,7 @@ echo.
 set NAPCAT_DIR=%~dp0tools\NapCatQQ
 set RESTART_COUNT=0
 set NAPCAT_RESTART_COUNT=0
-set NAPCAT_MAX_UPTIME=30
+set NAPCAT_MAX_UPTIME=180
 
 :: Main loop
 :main_loop

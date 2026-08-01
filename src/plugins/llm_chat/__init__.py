@@ -7,10 +7,11 @@ from nonebot.plugin import PluginMetadata
 
 from .config import Config
 from .knowledge_store import KnowledgeStore
+from .scene_detector import SceneDetector
 
 # ⚠️ 必须在模块级导入 handler，确保 on_message matcher 在插件加载时注册
 # 不能放在 on_startup 中延迟导入，否则 matcher 注册时机太晚不会生效
-from .handler import _init_config, _init_client, _set_knowledge_store
+from .handler import _init_config, _init_client, _set_knowledge_store, _set_scene_detector
 
 __plugin_meta__ = PluginMetadata(
     name="LLM 聊天",
@@ -22,12 +23,13 @@ __plugin_meta__ = PluginMetadata(
 driver = get_driver()
 plugin_config = Config()
 _knowledge_store: KnowledgeStore | None = None
+_scene_detector: SceneDetector | None = None
 
 
 @driver.on_startup
 async def on_startup():
     """机器人启动时初始化 LLM 客户端"""
-    global plugin_config, _knowledge_store
+    global plugin_config, _knowledge_store, _scene_detector
 
     # 从 driver.config 读取配置
     config_dict = {
@@ -53,6 +55,29 @@ async def on_startup():
                 logger.error(f"读取系统提示词文件失败: {prompt_path}, 错误: {e}")
         else:
             logger.error(f"系统提示词文件不存在: {prompt_path}")
+
+    # 加载 few-shot 对话示例（可选，追加到系统提示词末尾）
+    few_shot_file = config_dict.get("llm_few_shot_file", "")
+    if few_shot_file:
+        few_shot_path = Path(few_shot_file)
+        if not few_shot_path.is_absolute():
+            few_shot_path = Path.cwd() / few_shot_path
+        if few_shot_path.exists():
+            try:
+                few_shot_content = few_shot_path.read_text(encoding="utf-8").strip()
+                if few_shot_content:
+                    current_prompt = config_dict.get("llm_system_prompt", "")
+                    config_dict["llm_system_prompt"] = (
+                        current_prompt + "\n\n" + few_shot_content
+                    )
+                    logger.info(
+                        f"已加载对话风格示例: {few_shot_path} "
+                        f"({len(few_shot_content)} 字符)"
+                    )
+            except Exception as e:
+                logger.error(f"读取对话风格示例文件失败: {few_shot_path}, 错误: {e}")
+        else:
+            logger.warning(f"对话风格示例文件不存在: {few_shot_path}")
 
     try:
         plugin_config = Config(**config_dict)
@@ -80,6 +105,14 @@ async def on_startup():
             _knowledge_store = None
     else:
         logger.info("未配置知识库目录，LLM 将以无知识库模式运行")
+
+    # 初始化场景检测器（P3）
+    scene_file = plugin_config.llm_scene_triggers_file
+    if scene_file:
+        _scene_detector = SceneDetector(scene_file)
+        _set_scene_detector(_scene_detector)
+    else:
+        _set_scene_detector(None)
 
     # 同步配置给 handler（传入已加载的 plugin_config，防止被覆盖）
     _init_config(plugin_config)

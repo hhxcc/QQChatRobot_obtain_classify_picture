@@ -20,6 +20,10 @@ class Config(BaseModel):
     llm_system_prompt_file: str = Field(default="")
     # 分类常识库文件路径（可选，启动时会追加到系统提示词末尾）
     llm_knowledge_dir: str = Field(default="knowledge")
+    # Few-shot 对话风格示例文件（可选，启动时追加到系统提示词末尾）
+    llm_few_shot_file: str = Field(default="")
+    # 场景触发映射文件（可选，YAML 格式，用于话题→剧情锚点的场景检测）
+    llm_scene_triggers_file: str = Field(default="knowledge/scene_triggers.yaml")
 
     # 目标群 (空列表=所有群生效)
     llm_target_groups: List[int] = Field(default_factory=list)
