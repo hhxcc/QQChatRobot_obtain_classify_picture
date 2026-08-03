@@ -104,7 +104,7 @@ class KnowledgeStore:
                 logger.warning(f"主题目录不存在，跳过: {topic_dir}")
                 continue
 
-            for file_path in topic_dir.glob("*"):
+            for file_path in topic_dir.glob("**/*"):
                 if file_path.suffix not in (".txt", ".md"):
                     continue
                 total_files += 1
@@ -151,6 +151,8 @@ class KnowledgeStore:
         keywords = meta.get("keywords", [])
         if isinstance(keywords, str):
             keywords = [k.strip() for k in keywords.split(",")]
+        # 确保所有关键词都是字符串（YAML 可能将数字解析为 int）
+        keywords = [str(k).strip() for k in keywords if str(k).strip()]
         priority = meta.get("priority",
                            topic_priority.get(topic_name.split("/")[-1], 5))
 
@@ -191,7 +193,7 @@ class KnowledgeStore:
 
     def _insert_chunk(self, chunk: KnowledgeChunk) -> int:
         """将知识块插入 FTS5 索引，返回 rowid"""
-        keywords_str = " ".join(chunk.keywords)
+        keywords_str = " ".join(str(k) for k in chunk.keywords)
         cur = self._conn.execute(
             "INSERT INTO knowledge_fts(title, content, keywords) VALUES (?, ?, ?)",
             (chunk.title, chunk.content, keywords_str)

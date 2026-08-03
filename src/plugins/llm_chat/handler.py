@@ -6,13 +6,14 @@ from collections import defaultdict, deque
 from typing import Dict, Set
 
 from nonebot import on_message, logger, get_driver
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
+from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent, PrivateMessageEvent
 from nonebot.rule import Rule
 
 from .config import Config
 from .llm_client import LLMClient
 from .knowledge_store import KnowledgeStore
 from .scene_detector import SceneDetector
+from .commands import handle_slash_command
 
 
 # 获取全局配置
@@ -92,8 +93,28 @@ _message_buffer: Dict[int, list] = defaultdict(list)
 _current_cd: Dict[int, float] = defaultdict(lambda: 8.0)
 # 上次 LLM 动作时间戳: {group_id: timestamp}
 _last_action_time: Dict[int, float] = {}
+# 上次实际发送回复的时间戳: {group_id: timestamp}
+_last_reply_time: Dict[int, float] = {}
 # 并发防护
 _in_flight: Set[int] = set()
+# 暂停群集合
+_paused_groups: Set[int] = set()
+# 延迟刷新任务: {group_id: asyncio.Task}
+_pending_flush: Dict[int, "asyncio.Task"] = {}
+
+# ── 对话模式 / 本地预判 ──
+_CONVERSATION_WINDOW = 30.0       # 回复后 30 秒内视为「对话模式」
+_SKIP_CD_BOOST = 120.0            # 安静模式下 [SKIP] 后 CD 跳至此值
+TOPIC_KEYWORDS = [
+    "调酒", "酒吧", "鸡尾酒", "饮品", "龙舌兰酒", "喝一杯", "酒",
+    "龙舌兰", "埃内斯托", "潘乔", "哥哥", "爸爸", "养父", "家人",
+    "玻利瓦尔", "多索雷斯", "罗德岛",
+    "战斗", "打仗", "武器", "战场", "军人", "士兵",
+    "紫丁香", "花束",
+    "博士",
+    "方舟", "干员", "近卫", "术师", "源石", "矿石病", "感染者",
+    "羽毛笔", "拉菲艾拉", "拉珐",
+]
 
 
 # ── 辅助函数 ──
@@ -111,6 +132,31 @@ def _is_mentioned(event: GroupMessageEvent) -> bool:
     """检查消息是否 @ 了机器人"""
     at_segments = [seg for seg in event.message if seg.type == "at"]
     return any(seg.data.get("qq") == str(event.self_id) for seg in at_segments)
+
+
+def _in_conversation(group_id: int) -> bool:
+    """群当前是否处于「对话模式」（最近刚回复过某人）"""
+    last_reply = _last_reply_time.get(group_id, 0)
+    return (time.time() - last_reply) < _CONVERSATION_WINDOW
+
+
+def _should_skip_locally(text: str, group_id: int) -> bool:
+    """本地预判：只有四关全部不命中，才确定可以跳过 LLM 调用。
+    返回 True 表示「应该跳过」，False 表示「不确定，调 LLM」。
+    """
+    # 第1关：被叫名字？
+    if any(name in text for name in ["羽毛笔", "拉珐", "拉菲艾拉"]):
+        return False
+    # 第2关：涉及角色相关话题？
+    if any(kw in text for kw in TOPIC_KEYWORDS):
+        return False
+    # 第3关：有人在提问？
+    if any(q in text for q in ["?", "？", "吗", "呢", "什么", "怎么", "谁", "哪"]):
+        return False
+    # 第4关：群冷场了？（超过 2 分钟无人触发）
+    if time.time() - _last_action_time.get(group_id, 0) > 120:
+        return False
+    return True
 
 
 async def _call_llm(group_id: int, history: deque) -> str | None:
@@ -188,6 +234,7 @@ async def _send_if_valid(
         await bot.send_group_msg(group_id=group_id, message=reply)
         logger.info(f"[LLM] 已回复 | group={group_id} | {reply[:60]}")
         history.append({"role": "assistant", "content": reply})
+        _last_reply_time[group_id] = time.time()
         return True
     except Exception as e:
         logger.error(f"[LLM] 发送失败: {e}")
@@ -195,15 +242,75 @@ async def _send_if_valid(
 
 
 def _update_cd(group_id: int, did_reply: bool):
-    """更新冷却时间：回复→累加, SKIP→衰减"""
+    """更新冷却时间：
+    对话模式 ─ 回复→累加, SKIP→衰减
+    安静模式 ─ 回复→累加, SKIP→跳至 _SKIP_CD_BOOST（大幅延长）
+    """
     base = _plugin_config.llm_cooldown_base
     ceiling = _plugin_config.llm_cooldown_ceiling
     current = _current_cd.get(group_id, base)
     if did_reply:
         new_cd = min(current + base, ceiling)
-    else:
+    elif _in_conversation(group_id):
+        # 对话模式：SKIP 衰减
         new_cd = max(current / 2, base)
+    else:
+        # 安静模式：SKIP → 大幅 CD，等人主动叫
+        new_cd = max(current, _SKIP_CD_BOOST)
     _current_cd[group_id] = new_cd
+    _last_action_time[group_id] = time.time()
+
+
+async def _process_and_reply(bot: Bot, group_id: int, combined: str, history: deque):
+    """处理消息并回复（CD 到期后的核心逻辑，供正常流程和延迟刷新复用）"""
+    in_conv = _in_conversation(group_id)
+    if not in_conv and _should_skip_locally(combined, group_id):
+        logger.debug(f"[预判] 跳过 | group={group_id} | {combined[:60]}")
+        _current_cd[group_id] = _SKIP_CD_BOOST
+        _last_action_time[group_id] = time.time()
+        return
+    history.append({"role": "user", "content": combined})
+    reply = await _call_llm(group_id, history)
+    did_reply = await _send_if_valid(bot, group_id, reply, history)
+    _update_cd(group_id, did_reply)
+
+
+def _cancel_pending_flush(group_id: int):
+    """取消群的延迟刷新任务"""
+    task = _pending_flush.pop(group_id, None)
+    if task and not task.done():
+        task.cancel()
+
+
+def _schedule_flush(group_id: int, delay: float, bot: Bot):
+    """调度延迟刷新：CD 到期后自动处理缓冲区（解决缓冲卡死问题）"""
+    _cancel_pending_flush(group_id)
+
+    async def _delayed():
+        await asyncio.sleep(delay)
+        if group_id in _in_flight:
+            return
+        buf = _message_buffer.get(group_id, [])
+        if not buf:
+            return
+        _update_deque(group_id)
+        history = _group_histories[group_id]
+        lines = [m["formatted"] for m in buf]
+        _message_buffer[group_id] = []
+        combined = "\n".join(lines)
+        logger.info(
+            f"[LLM] 延迟刷新 | group={group_id} | {len(lines)} 条消息"
+        )
+        await _process_and_reply(bot, group_id, combined, history)
+
+    _pending_flush[group_id] = asyncio.create_task(_delayed())
+
+
+def _clear_group_state(group_id: int):
+    """清除群的缓冲、刷新任务和冷却（供 /clear 和 /pause 调用）"""
+    _cancel_pending_flush(group_id)
+    _message_buffer[group_id] = []
+    _current_cd[group_id] = _plugin_config.llm_cooldown_base
     _last_action_time[group_id] = time.time()
 
 
@@ -241,6 +348,18 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     formatted = f"{sender_name}: {raw_text}"
     mentioned = _is_mentioned(event)
 
+    # ── / 指令拦截 ──
+    if raw_text.startswith("/"):
+        handled = await handle_slash_command(
+            bot, event, raw_text, group_id,
+            _group_histories, _message_buffer, _current_cd,
+            _last_action_time, _plugin_config.llm_cooldown_base,
+            _paused_groups, _knowledge_store,
+            _cancel_pending_flush,
+        )
+        if handled:
+            return
+
     # ── 情况⑤: @mention → 立刻回复，重置 CD ──
     if mentioned:
         logger.info(f"[LLM] @提及 | group={group_id} | {formatted[:60]}")
@@ -262,6 +381,10 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         _last_action_time[group_id] = time.time()
         return
 
+    # ── 暂停检查（@mention 之后，/指令和@仍可触发回复）──
+    if group_id in _paused_groups:
+        return
+
     # ── 情况: LLM 调用进行中 → 消息进缓冲区 ──
     if group_id in _in_flight:
         _message_buffer[group_id].append(
@@ -277,6 +400,9 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     cd_expired = (time.time() - last_time) >= current_cd
 
     if cd_expired:
+        # ── 取消该群的延迟刷新任务（手动触发了）──
+        _cancel_pending_flush(group_id)
+
         # ── CD 到期 → 处理缓冲区 + 当前消息 ──
         _update_deque(group_id)
         history = _group_histories[group_id]
@@ -284,7 +410,6 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         _message_buffer[group_id] = []
 
         if buf:
-            # 情况③: 缓冲区有积压消息，一起发给 LLM
             lines = [m["formatted"] for m in buf]
             lines.append(formatted)
             combined = "\n".join(lines)
@@ -292,25 +417,23 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
                 f"[LLM] 缓冲释放 | group={group_id} | {len(lines)} 条消息"
             )
         else:
-            # 情况①: 缓冲区空，单条消息
             combined = formatted
             logger.info(f"[LLM] 收到消息 | group={group_id} | {formatted[:80]}")
 
-        history.append({"role": "user", "content": combined})
-        reply = await _call_llm(group_id, history)
-        did_reply = await _send_if_valid(bot, group_id, reply, history)
-        _update_cd(group_id, did_reply)
+        await _process_and_reply(bot, group_id, combined, history)
     else:
         # ── 情况②/④: CD 未到期 → 消息进缓冲区 ──
         _message_buffer[group_id].append(
             {"name": sender_name, "text": raw_text, "formatted": formatted}
         )
         _trim_buffer(group_id)
-        remaining = int(current_cd - (time.time() - last_time))
+        remaining = current_cd - (time.time() - last_time)
         logger.debug(
             f"[LLM] 缓冲 | group={group_id} | "
-            f"CD剩余={remaining}s | 缓冲={len(_message_buffer[group_id])}条"
+            f"CD剩余={remaining:.0f}s | 缓冲={len(_message_buffer[group_id])}条"
         )
+        # 调度延迟刷新：CD 到期后自动处理缓冲区
+        _schedule_flush(group_id, remaining + 0.5, bot)
 
 
 def _trim_buffer(group_id: int):
@@ -319,3 +442,118 @@ def _trim_buffer(group_id: int):
     limit = _plugin_config.llm_buffer_max
     if len(buf) > limit:
         _message_buffer[group_id] = buf[-limit:]
+
+
+# ── 私聊处理器 ──
+
+# 私聊状态（key=user_id）
+_private_histories: Dict[int, deque] = defaultdict(lambda: deque(maxlen=20))
+_private_last_action: Dict[int, float] = {}
+_private_last_reply: Dict[int, float] = {}
+_PRIVATE_CD = 4.0  # 私聊 CD 更短，因为是 1v1
+
+private_msg = on_message(rule=Rule(lambda event: isinstance(event, PrivateMessageEvent)))
+
+
+@private_msg.handle()
+async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
+    """私聊消息处理：始终回复，简化缓冲"""
+    if _llm_client is None:
+        return
+    if event.user_id == event.self_id:
+        return
+
+    user_id = event.user_id
+    text_segments = [seg for seg in event.message if seg.type == "text"]
+    if not text_segments:
+        return
+    raw_text = "".join(seg.data.get("text", "") for seg in text_segments).strip()
+    if not raw_text:
+        return
+
+    # ── / 指令拦截 ──
+    if raw_text.startswith("/"):
+        # 私聊中把 user_id 当 group_id 传给指令处理
+        handled = await handle_slash_command(
+            bot, event, raw_text, user_id,
+            _private_histories, {}, _current_cd,
+            _private_last_action, _PRIVATE_CD,
+            set(), _knowledge_store,
+        )
+        if handled:
+            return
+
+    # ── CD 检查 ──
+    last_time = _private_last_action.get(user_id, 0)
+    cd_expired = (time.time() - last_time) >= _PRIVATE_CD
+
+    if not cd_expired:
+        return  # 私聊不缓冲，直接丢弃（太快就等等）
+
+    # ── 构建历史 ──
+    history = _private_histories[user_id]
+    if history.maxlen != _plugin_config.llm_max_history:
+        _private_histories[user_id] = deque(list(history), maxlen=_plugin_config.llm_max_history)
+        history = _private_histories[user_id]
+
+    combined = f"对方: {raw_text}"
+
+    # ── 知识库检索 ──
+    messages = list(history)
+    if _knowledge_store and _knowledge_store.is_ready:
+        recent = [m["content"] for m in messages[-5:] if m["role"] == "user"]
+        recent.append(combined)
+        query = " ".join(recent)
+        chunks = _knowledge_store.search(query, top_k=3)
+        if chunks:
+            knowledge_text = "\n".join(
+                f"【{c.title}】{c.content[:400]}" for c in chunks
+            )
+            messages.insert(0, {
+                "role": "system",
+                "content": (
+                    "以下是与当前对话相关的参考知识，"
+                    "请根据角色人设选择性参考，不相关则忽略:\n"
+                    + knowledge_text
+                ),
+            })
+
+    # ── 场景检测 ──
+    if _scene_detector and _scene_detector.is_ready:
+        scene_contexts = _scene_detector.detect(combined)
+        if scene_contexts:
+            messages.insert(0, {"role": "system", "content": "\n".join(scene_contexts)})
+
+    history.append({"role": "user", "content": combined})
+    messages.append({"role": "user", "content": combined})
+
+    # ── 调 LLM ──
+    try:
+        reply = await asyncio.wait_for(
+            _llm_client.chat(messages),
+            timeout=15.0,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"[私聊] API 超时 | user={user_id}")
+        return
+    except Exception as e:
+        logger.error(f"[私聊] API 异常: {e}")
+        return
+
+    if reply is None:
+        return
+    reply = reply.strip()
+    if reply.upper() == "[SKIP]":
+        logger.info(f"[私聊] 决策跳过 | user={user_id}")
+        _private_last_action[user_id] = time.time()
+        return
+
+    try:
+        await bot.send_private_msg(user_id=user_id, message=reply)
+        logger.info(f"[私聊] 已回复 | user={user_id} | {reply[:60]}")
+        history.append({"role": "assistant", "content": reply})
+        _private_last_reply[user_id] = time.time()
+    except Exception as e:
+        logger.error(f"[私聊] 发送失败: {e}")
+
+    _private_last_action[user_id] = time.time()

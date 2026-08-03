@@ -11,7 +11,7 @@ from .scene_detector import SceneDetector
 
 # ⚠️ 必须在模块级导入 handler，确保 on_message matcher 在插件加载时注册
 # 不能放在 on_startup 中延迟导入，否则 matcher 注册时机太晚不会生效
-from .handler import _init_config, _init_client, _set_knowledge_store, _set_scene_detector
+from .handler import _init_config, _init_client, _set_knowledge_store, _set_scene_detector, _clear_group_state
 
 __plugin_meta__ = PluginMetadata(
     name="LLM 聊天",
