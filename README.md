@@ -1,6 +1,6 @@
 # QQ 群聊动漫图片采集分类机器人
 
-自动监听 QQ 群消息，下载图片并用 YOLOv8 分类保存二次元图片。内置 LLM 聊天插件，支持 7×24 无人值守运行。
+自动监听 QQ 群消息，下载图片并用 YOLOv8 分类保存二次元图片。内置 LLM 聊天插件，支持角色扮演与看图对话，支持 7×24 无人值守运行。
 
 ## 功能
 
@@ -8,6 +8,7 @@
 |------|------|
 | 🖼️ 图片分类 | YOLOv8 自定义模型，动漫/真实 二分类 |
 | 💬 LLM 聊天 | DeepSeek API 驱动，支持人格注入和知识库检索 |
+| 👁️ 看图对话 | GLM 视觉模型 + CLIP/OCR 本地预筛，识别图片内容并按人设回应 |
 | 🛡️ 防掉线 | 四层防护：自动登录 + 密码回退 + watchdog 检测 + 进程守护 |
 
 ## 架构
@@ -16,6 +17,7 @@
 QQ群 ──→ NapCatQQ ──WS──→ NoneBot2
                               ├── image_classifier → YOLOv8 → 本地存储
                               ├── llm_chat → DeepSeek API
+                              │     └── vision → GLM 视觉 API + CLIP/OCR 本地预筛
                               └── watchdog → 心跳保活 + 掉线重启
 ```
 
@@ -124,6 +126,39 @@ mkdir knowledge
 | `LLM_TEMPERATURE` | 生成温度 0-2 |
 | `LLM_COOLDOWN_BASE` | 回复冷却基准秒数 |
 
+### 视觉功能（看图说话）
+
+依赖 GLM 视觉 API（图片理解）+ CLIP/OCR 本地预筛（零成本过滤）。模型通过解耦接口配置，换模型只改 `VISION_PROVIDER` / `VISION_MODEL`。
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `LLM_VISION_ENABLED` | 视觉功能总开关 | `false` |
+| `VISION_PROVIDER` | 视觉 Provider（`glm`） | `glm` |
+| `VISION_API_KEY` | [智谱开放平台](https://open.bigmodel.cn) API Key | 空 |
+| `VISION_MODEL` | 视觉模型名 | `glm-4v-flash` |
+| `VISION_BASE_URL` | API 地址 | `https://open.bigmodel.cn/api/paas/v4` |
+| `VISION_TIMEOUT` | 视觉 API 超时（秒） | `15` |
+| `VISION_CLIP_ENABLED` | CLIP 本地预筛 | `true` |
+| `VISION_CLIP_THRESHOLD` | 纯图触发阈值（0-1），越低越易触发 | `0.6` |
+| `VISION_CLIP_MODEL_PATH` | CLIP 本地模型路径（不存在则在线加载） | `models/clip-vit-base-patch32` |
+| `VISION_OCR_ENABLED` | OCR 提取图片文字（表情包/截图） | `true` |
+| `VISION_REPLY_ON_AT` | @机器人+图必回 | `true` |
+| `VISION_REPLY_ON_TEXT_IMG` | 图文混发时图片辅助理解 | `true` |
+| `VISION_REPLY_ON_IMAGE_ONLY` | 纯图片消息触发（受冷却约束） | `true` |
+| `VISION_CACHE_TTL` | 同图缓存秒数（省成本） | `3600` |
+
+**群内指令**：`/vision on` | `/vision off` | `/vision status`
+
+**下载 CLIP 本地模型**（约 600MB，不入库）：
+
+```bash
+# 国内镜像，断点续传
+curl -L -o models/clip-vit-base-patch32/pytorch_model.bin \
+  "https://hf-mirror.com/openai/clip-vit-base-patch32/resolve/main/pytorch_model.bin"
+# 其余小文件：config.json / preprocessor_config.json / vocab.json / merges.txt
+# tokenizer_config.json / special_tokens_map.json 同样从 hf-mirror 下载
+```
+
 ### 看门狗
 
 | 层级 | 说明 |
@@ -152,12 +187,14 @@ python train_model.py
 ├── start_bot.bat              # 守护启动（推荐）
 ├── .env.example               # 配置模板
 ├── requirements.txt           # Python 依赖
-├── models/yolov8n-cls.pt      # 预训练模型
+├── models/yolov8n-cls.pt      # YOLO 预训练模型（入库）
+├── models/clip-vit-base-patch32/  # CLIP 本地预筛模型（~600MB，需下载，不入库）
 ├── knowledge.example/         # 知识库模板
 ├── 人格提示词.example.txt     # 人格提示词模板
 ├── src/plugins/
 │   ├── image_classifier/      # 图片分类插件
 │   ├── llm_chat/              # LLM 聊天插件
+│   │   └── vision/            # 视觉子模块（看图对话）
 │   └── watchdog.py            # 看门狗插件
 └── tools/NapCatQQ/            # NapCatQQ（需手动下载）
 ```
@@ -175,3 +212,9 @@ A: 运行 `train_model.py` 用自有数据微调模型。
 
 ### Q: 图片没有被分类？
 A: 需运行 `train_model.py` 训练专门的动漫二分类模型。默认的 ImageNet 预训练模型准确率有限。
+
+**Q: 看图功能报 429 限流？**
+A: 免费视觉模型访问量大时偶发 429，已内置自动重试与熔断。可切换更稳定的模型（`.env` 的 `VISION_MODEL`），或提高 `VISION_CLIP_THRESHOLD` 减少触发频率、调大 `VISION_CACHE_TTL` 复用缓存。
+
+**Q: 视觉识别失败会瞎猜吗？**
+A: 不会。识别失败时会注入"禁止编造画面"提示，Bot 只会基于已有信息（类别/图上文字）简单回应或回复 `[SKIP]`。

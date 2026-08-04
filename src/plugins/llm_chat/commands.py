@@ -8,6 +8,7 @@ from nonebot import logger
 from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
 
 from .knowledge_store import KnowledgeStore
+from .vision.commands import handle_vision_command
 
 # ── 可用指令注册表 ──
 COMMANDS: Dict[str, str] = {
@@ -17,6 +18,7 @@ COMMANDS: Dict[str, str] = {
     "pause": "暂停在此群的自动回复",
     "resume": "恢复在此群的自动回复",
     "status": "查看当前群的状态信息",
+    "vision": "视觉开关：/vision on|off|status",
 }
 
 
@@ -176,5 +178,9 @@ async def handle_slash_command(
             message="\n".join(lines),
         )
         return True
+
+    # ── /vision ──
+    if cmd == "vision":
+        return await handle_vision_command(bot, event, arg)
 
     return False

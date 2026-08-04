@@ -8,6 +8,7 @@ from nonebot.plugin import PluginMetadata
 from .config import Config
 from .knowledge_store import KnowledgeStore
 from .scene_detector import SceneDetector
+from .vision import init_vision
 
 # ⚠️ 必须在模块级导入 handler，确保 on_message matcher 在插件加载时注册
 # 不能放在 on_startup 中延迟导入，否则 matcher 注册时机太晚不会生效
@@ -117,6 +118,9 @@ async def on_startup():
     # 同步配置给 handler（传入已加载的 plugin_config，防止被覆盖）
     _init_config(plugin_config)
     await _init_client()
+
+    # 初始化视觉服务（图片理解与看图对话）
+    init_vision(driver.config)
 
     logger.info("✅ LLM 聊天插件已启动")
 

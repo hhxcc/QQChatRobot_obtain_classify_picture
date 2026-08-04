@@ -41,3 +41,8 @@ openai>=1.0.0
 # --- 知识库检索 ---
 jieba>=0.42
 pyyaml>=6.0
+
+# --- 视觉功能 (图片理解与看图对话) ---
+# CLIP 本地预筛 + RapidOCR 文字提取（可选，缺失时自动降级）
+transformers>=4.40.0
+rapidocr-onnxruntime>=1.3.0

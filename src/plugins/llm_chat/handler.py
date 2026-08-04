@@ -14,6 +14,7 @@ from .llm_client import LLMClient
 from .knowledge_store import KnowledgeStore
 from .scene_detector import SceneDetector
 from .commands import handle_slash_command
+from .vision import get_vision
 
 
 # 获取全局配置
@@ -261,10 +262,24 @@ def _update_cd(group_id: int, did_reply: bool):
     _last_action_time[group_id] = time.time()
 
 
-async def _process_and_reply(bot: Bot, group_id: int, combined: str, history: deque):
-    """处理消息并回复（CD 到期后的核心逻辑，供正常流程和延迟刷新复用）"""
+async def _process_and_reply(
+    bot: Bot,
+    group_id: int,
+    combined: str,
+    history: deque,
+    skip_local_check: bool = False,
+):
+    """处理消息并回复（CD 到期后的核心逻辑，供正常流程和延迟刷新复用）
+
+    Args:
+        skip_local_check: 是否跳过本地预判（纯图片消息已由视觉决策把关，直接调 LLM）
+    """
     in_conv = _in_conversation(group_id)
-    if not in_conv and _should_skip_locally(combined, group_id):
+    if (
+        not skip_local_check
+        and not in_conv
+        and _should_skip_locally(combined, group_id)
+    ):
         logger.debug(f"[预判] 跳过 | group={group_id} | {combined[:60]}")
         _current_cd[group_id] = _SKIP_CD_BOOST
         _last_action_time[group_id] = time.time()
@@ -296,12 +311,16 @@ def _schedule_flush(group_id: int, delay: float, bot: Bot):
         _update_deque(group_id)
         history = _group_histories[group_id]
         lines = [m["formatted"] for m in buf]
+        # 缓冲消息全部为纯图时，跳过本地预判（视觉决策已把关）
+        all_pure_image = all(m.get("pure_image", False) for m in buf)
         _message_buffer[group_id] = []
         combined = "\n".join(lines)
         logger.info(
             f"[LLM] 延迟刷新 | group={group_id} | {len(lines)} 条消息"
         )
-        await _process_and_reply(bot, group_id, combined, history)
+        await _process_and_reply(
+            bot, group_id, combined, history, skip_local_check=all_pure_image
+        )
 
     _pending_flush[group_id] = asyncio.create_task(_delayed())
 
@@ -319,6 +338,65 @@ def _clear_group_state(group_id: int):
 group_msg = on_message(rule=Rule(lambda event: isinstance(event, GroupMessageEvent)))
 
 
+async def _build_image_context(
+    bot: Bot,
+    event: GroupMessageEvent,
+    image_segments: list,
+    *,
+    is_mentioned: bool,
+    has_text: bool,
+    text: str,
+) -> str:
+    """下载图片并调用视觉服务，返回可注入 LLM 的图片上下文文本。
+
+    仅当视觉开启时被调用；返回空串表示无需附加（下载失败/不值得分析）。
+    """
+    vision = get_vision()
+    if vision is None or not vision.enabled:
+        return ""
+
+    seg = image_segments[0]
+    url = seg.data.get("url", "")
+    if not url:
+        return ""
+
+    try:
+        img_bytes = await vision.download_image(url, timeout=15)
+    except Exception as e:
+        logger.warning(f"[Vision] 图片下载失败: {e}")
+        return ""
+
+    desc, local = await vision.analyze_image(
+        img_bytes,
+        is_mentioned=is_mentioned,
+        has_text=has_text,
+        context=text,
+    )
+
+    parts = []
+    has_desc = bool(desc and desc.description)
+    has_extra = False
+    if local:
+        if local.has_text:
+            parts.append(f"图上文字：{local.ocr_text}")
+            has_extra = True
+        if local.clip_category and local.clip_category != "其他":
+            parts.append(f"图片类别：{local.clip_category}（{local.clip_conf:.0%}）")
+            has_extra = True
+    if has_desc:
+        parts.append(f"画面描述：{desc.description}")
+    elif has_extra:
+        # 视觉识别失败：明确禁止 LLM 编造画面内容（宁可不回，不瞎猜）
+        parts.append(
+            "（画面识别失败，请勿猜测或编造画面细节，"
+            "仅基于已有信息简单回应，或回复 [SKIP]）"
+        )
+
+    if not parts:
+        return ""
+    return "[发来一张图片]\n" + "\n".join(parts)
+
+
 @group_msg.handle()
 async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     """缓冲 + 动态冷却 状态机"""
@@ -334,14 +412,47 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     ):
         return
 
-    # 提取文字
+    # 提取文字与图片
     text_segments = [seg for seg in event.message if seg.type == "text"]
-    if not text_segments:
+    image_segments = [seg for seg in event.message if seg.type == "image"]
+    if not text_segments and not image_segments:
         return
     sender_name = event.sender.card or event.sender.nickname or str(event.user_id)
-    raw_text = "".join(seg.data.get("text", "") for seg in text_segments).strip()
-    if not raw_text:
-        return
+    raw_text_original = "".join(
+        seg.data.get("text", "") for seg in text_segments
+    ).strip()
+
+    # ── 视觉：构建图片上下文（有图且视觉开启时）──
+    image_context = ""
+    pure_image = False
+    vision = get_vision()
+    if (
+        image_segments
+        and vision
+        and vision.enabled
+        and not raw_text_original.startswith("/")
+    ):
+        image_context = await _build_image_context(
+            bot,
+            event,
+            image_segments,
+            is_mentioned=_is_mentioned(event),
+            has_text=bool(raw_text_original),
+            text=raw_text_original,
+        )
+
+    # 纯图片消息：以图片上下文为消息主体（跳过本地预判，由视觉决策把关）
+    if not raw_text_original:
+        if not image_context:
+            return
+        raw_text = image_context
+        pure_image = True
+    else:
+        # 图文混发：图片上下文作为附加信息，文字为主
+        raw_text = raw_text_original + (
+            f"\n{image_context}" if image_context else ""
+        )
+
     if len(raw_text) < 2 and not raw_text.isalpha():
         return
 
@@ -388,7 +499,12 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     # ── 情况: LLM 调用进行中 → 消息进缓冲区 ──
     if group_id in _in_flight:
         _message_buffer[group_id].append(
-            {"name": sender_name, "text": raw_text, "formatted": formatted}
+            {
+                "name": sender_name,
+                "text": raw_text,
+                "formatted": formatted,
+                "pure_image": pure_image,
+            }
         )
         _trim_buffer(group_id)
         return
@@ -413,6 +529,10 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
             lines = [m["formatted"] for m in buf]
             lines.append(formatted)
             combined = "\n".join(lines)
+            # 仅当缓冲消息与当前消息都是纯图时才跳过本地预判
+            pure_image = pure_image and all(
+                m.get("pure_image", False) for m in buf
+            )
             logger.info(
                 f"[LLM] 缓冲释放 | group={group_id} | {len(lines)} 条消息"
             )
@@ -420,11 +540,18 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
             combined = formatted
             logger.info(f"[LLM] 收到消息 | group={group_id} | {formatted[:80]}")
 
-        await _process_and_reply(bot, group_id, combined, history)
+        await _process_and_reply(
+            bot, group_id, combined, history, skip_local_check=pure_image
+        )
     else:
         # ── 情况②/④: CD 未到期 → 消息进缓冲区 ──
         _message_buffer[group_id].append(
-            {"name": sender_name, "text": raw_text, "formatted": formatted}
+            {
+                "name": sender_name,
+                "text": raw_text,
+                "formatted": formatted,
+                "pure_image": pure_image,
+            }
         )
         _trim_buffer(group_id)
         remaining = current_cd - (time.time() - last_time)

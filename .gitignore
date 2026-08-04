@@ -17,8 +17,10 @@ input/
 runs/
 yolo26n.pt
 
-# 模型 (2.9MB，保留提交)
+# 模型 (yolov8n-cls.pt 2.9MB，保留提交)
 # models/*.pt  ← 已移除这个规则
+# CLIP 视觉预筛模型 (~600MB，本地模型不入库，需手动下载)
+models/clip-vit-base-patch32/
 
 # 采集的图片
 data/images/
