@@ -25,6 +25,11 @@ models/clip-vit-base-patch32/
 # 采集的图片
 data/images/
 
+# 长期记忆数据库 (运行时生成，重启不丢)
+data/memory.db
+data/memory.db-wal
+data/memory.db-shm
+
 # 日志
 logs/
 

@@ -1,5 +1,6 @@
 """LLM 聊天插件 - NoneBot2 入口"""
 
+import asyncio
 from pathlib import Path
 
 from nonebot import get_driver, logger
@@ -8,15 +9,29 @@ from nonebot.plugin import PluginMetadata
 from .config import Config
 from .knowledge_store import KnowledgeStore
 from .scene_detector import SceneDetector
+from .llm_client import LLMClient
+from .memory_store import MemoryStore
+from .memory_distiller import MemoryDistiller
+from .web_search import WebSearcher, build_search_tools
 from .vision import init_vision
 
 # ⚠️ 必须在模块级导入 handler，确保 on_message matcher 在插件加载时注册
 # 不能放在 on_startup 中延迟导入，否则 matcher 注册时机太晚不会生效
-from .handler import _init_config, _init_client, _set_knowledge_store, _set_scene_detector, _clear_group_state
+from .handler import (
+    _init_config,
+    _init_client,
+    _set_knowledge_store,
+    _set_scene_detector,
+    _set_memory_store,
+    _set_memory_distiller,
+    _set_web_searcher,
+    _set_search_tools,
+    _clear_group_state,
+)
 
 __plugin_meta__ = PluginMetadata(
     name="LLM 聊天",
-    description="监听群聊文字消息，交由 DeepSeek 大模型决策是否回复，支持角色扮演",
+    description="监听群聊文字消息，交由 DeepSeek 大模型决策是否回复，支持角色扮演、长期记忆与联网搜索",
     usage="自动运行，无需手动触发。配置见 .env 文件。",
     config=Config,
 )
@@ -25,6 +40,10 @@ driver = get_driver()
 plugin_config = Config()
 _knowledge_store: KnowledgeStore | None = None
 _scene_detector: SceneDetector | None = None
+_memory_store: MemoryStore | None = None
+_memory_distiller: MemoryDistiller | None = None
+_web_searcher: WebSearcher | None = None
+_periodic_task: asyncio.Task | None = None
 
 
 @driver.on_startup
@@ -119,17 +138,134 @@ async def on_startup():
     _init_config(plugin_config)
     await _init_client()
 
+    # ── 长期记忆：存储 + 蒸馏器（解耦模型，可一行切换更便宜的蒸馏模型）──
+    global _memory_store, _memory_distiller
+    if plugin_config.llm_memory_enabled:
+        try:
+            store = MemoryStore(plugin_config.memory_db_path)
+            # 蒸馏模型：优先用独立配置，未配置则复用 DeepSeek 聊天配置
+            distill_api_key = (
+                plugin_config.memory_api_key or plugin_config.deepseek_api_key
+            )
+            if distill_api_key and distill_api_key not in (
+                "your-api-key-here",
+                "sk-xxxxxxxx",
+                "",
+            ):
+                distill_client = LLMClient(
+                    api_key=distill_api_key,
+                    base_url=(
+                        plugin_config.memory_base_url
+                        or plugin_config.deepseek_base_url
+                    ),
+                    model=plugin_config.memory_model,
+                    system_prompt="你是记忆管理助手，只负责提炼与归纳，保持简洁客观。",
+                    temperature=0.3,
+                    max_tokens=512,
+                )
+                _memory_distiller = MemoryDistiller(
+                    distill_client,
+                    store,
+                    threshold=plugin_config.memory_distill_threshold,
+                )
+            else:
+                logger.warning(
+                    "长期记忆：未配置有效的蒸馏 API Key，记忆模块仅记录不蒸馏。"
+                )
+                _memory_distiller = MemoryDistiller(
+                    None, store, threshold=plugin_config.memory_distill_threshold
+                )
+            _memory_store = store
+            _set_memory_store(store)
+            _set_memory_distiller(_memory_distiller)
+            logger.info(
+                f"长期记忆已启用: db={plugin_config.memory_db_path} | "
+                f"蒸馏模型={plugin_config.memory_model} | "
+                f"阈值={plugin_config.memory_distill_threshold}条"
+            )
+        except Exception as e:
+            logger.error(f"长期记忆初始化失败: {e}")
+            _memory_store = None
+            _memory_distiller = None
+            _set_memory_store(None)
+            _set_memory_distiller(None)
+    else:
+        logger.info("长期记忆未启用（LLM_MEMORY_ENABLED=false）")
+
+    # ── 联网搜索：Function Calling 工具 ──
+    global _web_searcher
+    if plugin_config.llm_web_search_enabled:
+        try:
+            _web_searcher = WebSearcher(
+                engine=plugin_config.search_engine,
+                result_count=plugin_config.search_result_count,
+                timeout=plugin_config.search_timeout,
+            )
+            tools = build_search_tools(enabled=True)
+            _set_web_searcher(_web_searcher)
+            _set_search_tools(tools)
+            logger.info(
+                f"联网搜索已启用: 默认引擎={plugin_config.search_engine} | "
+                f"{len(tools)} 个搜索函数"
+            )
+        except Exception as e:
+            logger.error(f"联网搜索初始化失败: {e}")
+            _web_searcher = None
+            _set_web_searcher(None)
+            _set_search_tools([])
+    else:
+        logger.info("联网搜索未启用（LLM_WEB_SEARCH_ENABLED=false）")
+
+    # ── 定时兜底蒸馏任务 ──
+    global _periodic_task
+    if _memory_distiller and _memory_distiller.is_ready:
+        _periodic_task = asyncio.create_task(
+            _memory_periodic_loop(plugin_config.memory_distill_interval)
+        )
+        logger.info(
+            f"定时兜底蒸馏已启动: 每 {plugin_config.memory_distill_interval}s 一次"
+        )
+
     # 初始化视觉服务（图片理解与看图对话）
     init_vision(driver.config)
 
     logger.info("✅ LLM 聊天插件已启动")
 
 
+async def _memory_periodic_loop(interval: float):
+    """定时兜底蒸馏：周期蒸馏所有待处理个人画像与群事件"""
+    while True:
+        await asyncio.sleep(interval)
+        if _memory_distiller:
+            try:
+                await _memory_distiller.flush_all()
+            except Exception as e:
+                logger.warning(f"[记忆] 定时兜底蒸馏出错: {e}")
+
+
 @driver.on_shutdown
 async def on_shutdown():
     """机器人关闭时清理资源"""
-    global _knowledge_store
+    global _knowledge_store, _memory_store, _web_searcher, _periodic_task
+
+    if _periodic_task:
+        _periodic_task.cancel()
+        _periodic_task = None
+
     if _knowledge_store:
         _knowledge_store.close()
         _knowledge_store = None
+
+    if _memory_store:
+        _memory_store.close()
+        _memory_store = None
+        _set_memory_store(None)
+        _set_memory_distiller(None)
+
+    if _web_searcher:
+        await _web_searcher.close()
+        _web_searcher = None
+        _set_web_searcher(None)
+        _set_search_tools([])
+
     logger.info("LLM 聊天插件已关闭")

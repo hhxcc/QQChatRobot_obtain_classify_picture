@@ -15,6 +15,9 @@ from .knowledge_store import KnowledgeStore
 from .scene_detector import SceneDetector
 from .commands import handle_slash_command
 from .vision import get_vision
+from .memory_store import MemoryStore
+from .memory_distiller import MemoryDistiller
+from .web_search import WebSearcher, execute_search_tool
 
 
 # 获取全局配置
@@ -23,6 +26,10 @@ _plugin_config: Config = Config()
 _llm_client: LLMClient | None = None
 _knowledge_store: KnowledgeStore | None = None
 _scene_detector: SceneDetector | None = None
+_memory_store: MemoryStore | None = None
+_memory_distiller: MemoryDistiller | None = None
+_web_searcher: WebSearcher | None = None
+_search_tools: list = []
 
 
 def _set_knowledge_store(store: KnowledgeStore | None):
@@ -35,6 +42,30 @@ def _set_scene_detector(detector: SceneDetector | None):
     """由 __init__.py 在启动时注入场景检测器实例"""
     global _scene_detector
     _scene_detector = detector
+
+
+def _set_memory_store(store: MemoryStore | None):
+    """由 __init__.py 在启动时注入长期记忆存储"""
+    global _memory_store
+    _memory_store = store
+
+
+def _set_memory_distiller(distiller: MemoryDistiller | None):
+    """由 __init__.py 在启动时注入记忆蒸馏器"""
+    global _memory_distiller
+    _memory_distiller = distiller
+
+
+def _set_web_searcher(searcher: WebSearcher | None):
+    """由 __init__.py 在启动时注入联网搜索器"""
+    global _web_searcher
+    _web_searcher = searcher
+
+
+def _set_search_tools(tools: list):
+    """由 __init__.py 在启动时注入搜索 Function 工具定义"""
+    global _search_tools
+    _search_tools = tools
 
 
 def _init_config(existing_config: Config | None = None):
@@ -160,16 +191,82 @@ def _should_skip_locally(text: str, group_id: int) -> bool:
     return True
 
 
-async def _call_llm(group_id: int, history: deque) -> str | None:
-    """调用 LLM，返回回复文本或 None（自动注入知识库检索结果）"""
+def _build_memory_context(group_id: int, query: str, active_qq: int | None) -> str:
+    """构建长期记忆上下文（个人画像 + 群事件 + 群友画像），无命中返回空串"""
+    if _memory_store is None:
+        return ""
+    parts: list = []
+
+    # 1) 当前对话对象的个人画像（最相关）
+    if active_qq is not None:
+        prof = _memory_store.get_profile(group_id, active_qq)
+        if prof and (prof["summary"] or prof["relationship"] or prof["key_events"]):
+            lines = [f"群友「{prof['nickname'] or active_qq}」的长期印象："]
+            if prof["summary"]:
+                lines.append(prof["summary"])
+            if prof["relationship"]:
+                lines.append(f"关系：{prof['relationship']}")
+            if prof["key_events"]:
+                lines.append("记得关于他的事：")
+                lines.append(prof["key_events"])
+            parts.append("\n".join(lines))
+
+    # 2) 群事件关键词检索
+    if query:
+        events = _memory_store.search_group_events(group_id, query, top_k=2)
+        if events:
+            lines = ["群里曾发生或提到过："]
+            for e in events:
+                lines.append(f"- {e['title']}：{e['summary']}")
+            parts.append("\n".join(lines))
+
+    # 3) 群友画像关键词检索（消息里提到别人时）
+    if query:
+        joined = "".join(parts)
+        for p in _memory_store.search_profiles(group_id, query, top_k=2):
+            if not p["nickname"] or p["nickname"] in joined:
+                continue
+            lines = [f"关于群友「{p['nickname']}」的印象："]
+            if p["summary"]:
+                lines.append(p["summary"])
+            if p["relationship"]:
+                lines.append(f"关系：{p['relationship']}")
+            parts.append("\n".join(lines))
+
+    if not parts:
+        return ""
+    return (
+        "以下是你对这群人和这个群的长期记忆（自然体现在言行里，不要背诵）：\n"
+        + "\n\n".join(parts)
+    )
+
+
+async def _handle_search_tool(name: str, args_json: str) -> str:
+    """Function Calling 工具执行器（路由到搜索引擎）"""
+    return await execute_search_tool(_web_searcher, name, args_json)
+
+
+async def _call_llm(
+    group_id: int,
+    history: deque,
+    active_qq: int | None = None,
+) -> str | None:
+    """调用 LLM，返回回复文本或 None。
+
+    自动注入: 知识库检索 + 场景检测(P3) + 长期记忆。
+    若启用了联网搜索，则通过 Function Calling 让模型按需搜索。
+    """
     _in_flight.add(group_id)
     try:
-        # ── 知识库检索 ──
+        # ── 消息列表 ──
         messages = list(history)
+
+        # ── 取最近消息作为检索查询 ──
+        recent = [m["content"] for m in messages[-5:] if m["role"] == "user"]
+        query = " ".join(recent)
+
+        # ── 知识库检索 ──
         if _knowledge_store and _knowledge_store.is_ready:
-            # 取最近几条消息作为搜索查询
-            recent = [m["content"] for m in messages[-5:] if m["role"] == "user"]
-            query = " ".join(recent)
             chunks = _knowledge_store.search(query, top_k=3)
             if chunks:
                 knowledge_text = "\n".join(
@@ -197,19 +294,40 @@ async def _call_llm(group_id: int, history: deque) -> str | None:
             scene_contexts = _scene_detector.detect(query)
             if scene_contexts:
                 combined = "\n".join(scene_contexts)
-                messages.insert(
-                    0,
-                    {"role": "system", "content": combined},
-                )
+                messages.insert(0, {"role": "system", "content": combined})
                 logger.debug(
                     f"[LLM] 场景命中 | group={group_id} | "
                     f"{len(scene_contexts)} 个场景"
                 )
 
-        reply = await asyncio.wait_for(
-            _llm_client.chat(messages),
-            timeout=15.0,
-        )
+        # ── 长期记忆注入 ──
+        memory_context = _build_memory_context(group_id, query, active_qq)
+        if memory_context:
+            messages.insert(0, {"role": "system", "content": memory_context})
+            logger.debug(f"[LLM] 记忆命中 | group={group_id}")
+
+        # ── 调用 LLM（优先带 Function Calling）──
+        if _search_tools:
+            reply = await asyncio.wait_for(
+                _llm_client.chat_with_tools(
+                    messages, _search_tools, _handle_search_tool
+                ),
+                timeout=45.0,
+            )
+            if reply is None:
+                # 工具路径失败（模型不支持 tools / 轮次超限等）→ 回退普通对话
+                logger.warning(
+                    f"[LLM] 工具路径无结果，回退普通对话 | group={group_id}"
+                )
+                reply = await asyncio.wait_for(
+                    _llm_client.chat(messages),
+                    timeout=15.0,
+                )
+        else:
+            reply = await asyncio.wait_for(
+                _llm_client.chat(messages),
+                timeout=15.0,
+            )
         return reply
     except asyncio.TimeoutError:
         logger.warning(f"[LLM] API 超时 | group={group_id}")
@@ -268,11 +386,13 @@ async def _process_and_reply(
     combined: str,
     history: deque,
     skip_local_check: bool = False,
+    active_qq: int | None = None,
 ):
     """处理消息并回复（CD 到期后的核心逻辑，供正常流程和延迟刷新复用）
 
     Args:
         skip_local_check: 是否跳过本地预判（纯图片消息已由视觉决策把关，直接调 LLM）
+        active_qq: 当前对话对象的 QQ（用于长期记忆注入）
     """
     in_conv = _in_conversation(group_id)
     if (
@@ -285,7 +405,7 @@ async def _process_and_reply(
         _last_action_time[group_id] = time.time()
         return
     history.append({"role": "user", "content": combined})
-    reply = await _call_llm(group_id, history)
+    reply = await _call_llm(group_id, history, active_qq=active_qq)
     did_reply = await _send_if_valid(bot, group_id, reply, history)
     _update_cd(group_id, did_reply)
 
@@ -313,13 +433,16 @@ def _schedule_flush(group_id: int, delay: float, bot: Bot):
         lines = [m["formatted"] for m in buf]
         # 缓冲消息全部为纯图时，跳过本地预判（视觉决策已把关）
         all_pure_image = all(m.get("pure_image", False) for m in buf)
+        # 取最后一条消息的发送者作为记忆注入对象
+        active_qq = buf[-1].get("qq") if buf else None
         _message_buffer[group_id] = []
         combined = "\n".join(lines)
         logger.info(
             f"[LLM] 延迟刷新 | group={group_id} | {len(lines)} 条消息"
         )
         await _process_and_reply(
-            bot, group_id, combined, history, skip_local_check=all_pure_image
+            bot, group_id, combined, history,
+            skip_local_check=all_pure_image, active_qq=active_qq,
         )
 
     _pending_flush[group_id] = asyncio.create_task(_delayed())
@@ -422,6 +545,25 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         seg.data.get("text", "") for seg in text_segments
     ).strip()
 
+    # ── 长期记忆：记录原始消息，达到消息量阈值则触发蒸馏 ──
+    if (
+        _memory_distiller
+        and _memory_distiller.is_ready
+        and len(raw_text_original) >= 2
+    ):
+        try:
+            _memory_store.append_message(
+                group_id, event.user_id, sender_name, raw_text_original
+            )
+            if _memory_distiller.should_distill_person(group_id, event.user_id):
+                asyncio.create_task(
+                    _memory_distiller.distill_person(
+                        group_id, event.user_id, sender_name
+                    )
+                )
+        except Exception as e:
+            logger.debug(f"[记忆] 记录消息失败: {e}")
+
     # ── 视觉：构建图片上下文（有图且视觉开启时）──
     image_context = ""
     pure_image = False
@@ -485,7 +627,7 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
             _message_buffer[group_id] = []
         history.append({"role": "user", "content": formatted})
 
-        reply = await _call_llm(group_id, history)
+        reply = await _call_llm(group_id, history, active_qq=event.user_id)
         did_reply = await _send_if_valid(bot, group_id, reply, history)
         # @mention 回复后将 CD 重置为基准值
         _current_cd[group_id] = _plugin_config.llm_cooldown_base
@@ -504,6 +646,7 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
                 "text": raw_text,
                 "formatted": formatted,
                 "pure_image": pure_image,
+                "qq": event.user_id,
             }
         )
         _trim_buffer(group_id)
@@ -541,7 +684,8 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
             logger.info(f"[LLM] 收到消息 | group={group_id} | {formatted[:80]}")
 
         await _process_and_reply(
-            bot, group_id, combined, history, skip_local_check=pure_image
+            bot, group_id, combined, history,
+            skip_local_check=pure_image, active_qq=event.user_id,
         )
     else:
         # ── 情况②/④: CD 未到期 → 消息进缓冲区 ──
@@ -551,6 +695,7 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
                 "text": raw_text,
                 "formatted": formatted,
                 "pure_image": pure_image,
+                "qq": event.user_id,
             }
         )
         _trim_buffer(group_id)
@@ -598,6 +743,24 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
     if not raw_text:
         return
 
+    # ── 长期记忆：私聊也记录（以 user_id 作为独立记忆空间）──
+    sender_nick = event.sender.card or event.sender.nickname or str(user_id)
+    if (
+        _memory_distiller
+        and _memory_distiller.is_ready
+        and len(raw_text) >= 2
+    ):
+        try:
+            _memory_store.append_message(user_id, user_id, sender_nick, raw_text)
+            if _memory_distiller.should_distill_person(user_id, user_id):
+                asyncio.create_task(
+                    _memory_distiller.distill_person(
+                        user_id, user_id, sender_nick
+                    )
+                )
+        except Exception as e:
+            logger.debug(f"[记忆] 私聊记录失败: {e}")
+
     # ── / 指令拦截 ──
     if raw_text.startswith("/"):
         # 私聊中把 user_id 当 group_id 传给指令处理
@@ -624,48 +787,10 @@ async def handle_private_message(bot: Bot, event: PrivateMessageEvent):
         history = _private_histories[user_id]
 
     combined = f"对方: {raw_text}"
-
-    # ── 知识库检索 ──
-    messages = list(history)
-    if _knowledge_store and _knowledge_store.is_ready:
-        recent = [m["content"] for m in messages[-5:] if m["role"] == "user"]
-        recent.append(combined)
-        query = " ".join(recent)
-        chunks = _knowledge_store.search(query, top_k=3)
-        if chunks:
-            knowledge_text = "\n".join(
-                f"【{c.title}】{c.content[:400]}" for c in chunks
-            )
-            messages.insert(0, {
-                "role": "system",
-                "content": (
-                    "以下是与当前对话相关的参考知识，"
-                    "请根据角色人设选择性参考，不相关则忽略:\n"
-                    + knowledge_text
-                ),
-            })
-
-    # ── 场景检测 ──
-    if _scene_detector and _scene_detector.is_ready:
-        scene_contexts = _scene_detector.detect(combined)
-        if scene_contexts:
-            messages.insert(0, {"role": "system", "content": "\n".join(scene_contexts)})
-
     history.append({"role": "user", "content": combined})
-    messages.append({"role": "user", "content": combined})
 
-    # ── 调 LLM ──
-    try:
-        reply = await asyncio.wait_for(
-            _llm_client.chat(messages),
-            timeout=15.0,
-        )
-    except asyncio.TimeoutError:
-        logger.warning(f"[私聊] API 超时 | user={user_id}")
-        return
-    except Exception as e:
-        logger.error(f"[私聊] API 异常: {e}")
-        return
+    # ── 调 LLM（自动注入知识库 / 记忆 / 场景，支持联网搜索）──
+    reply = await _call_llm(user_id, history, active_qq=user_id)
 
     if reply is None:
         return

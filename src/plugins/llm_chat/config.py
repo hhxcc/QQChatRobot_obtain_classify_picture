@@ -39,5 +39,26 @@ class Config(BaseModel):
     llm_temperature: float = Field(default=0.8, ge=0.0, le=2.0)
     llm_max_tokens: int = Field(default=512, ge=1, le=4096)
 
+    # ── 长期记忆 ──
+    llm_memory_enabled: bool = Field(default=True)
+    # 记忆数据库路径（sqlite，持久化，重启不丢）
+    memory_db_path: str = Field(default="data/memory.db")
+    # 蒸馏模型（解耦，可与聊天模型不同；API Key 留空则复用 DeepSeek 聊天配置）
+    memory_provider: str = Field(default="deepseek")
+    memory_base_url: str = Field(default="")
+    memory_api_key: str = Field(default="")
+    memory_model: str = Field(default="deepseek-chat")
+    # 每人累积多少条消息触发一次蒸馏（消息量触发）
+    memory_distill_threshold: int = Field(default=30, ge=2, le=500)
+    # 定时兜底蒸馏间隔（秒）
+    memory_distill_interval: int = Field(default=1800, ge=60)
+
+    # ── 联网搜索 ──
+    llm_web_search_enabled: bool = Field(default=True)
+    # 默认搜索方式：bing | duckduckgo | baidu（模型也可调用其他引擎函数）
+    search_engine: str = Field(default="bing")
+    search_result_count: int = Field(default=5, ge=1, le=10)
+    search_timeout: float = Field(default=8.0)
+
     class Config:
         extra = "ignore"

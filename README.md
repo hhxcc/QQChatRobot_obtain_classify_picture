@@ -1,4 +1,4 @@
-# QQ 群聊动漫图片采集分类机器人
+# QQ 群聊聊天兼动漫图片采集分类机器人
 
 自动监听 QQ 群消息，下载图片并用 YOLOv8 分类保存二次元图片。内置 LLM 聊天插件，支持角色扮演与看图对话，支持 7×24 无人值守运行。
 
@@ -8,6 +8,8 @@
 |------|------|
 | 🖼️ 图片分类 | YOLOv8 自定义模型，动漫/真实 二分类 |
 | 💬 LLM 聊天 | DeepSeek API 驱动，支持人格注入和知识库检索 |
+| 🧠 长期记忆 | sqlite 持久化，AI 自动蒸馏群友画像/群事件，重启不丢 |
+| 🔎 联网搜索 | Function Calling 按需搜索百科/网络，搜不到如实回答 |
 | 👁️ 看图对话 | GLM 视觉模型 + CLIP/OCR 本地预筛，识别图片内容并按人设回应 |
 | 🛡️ 防掉线 | 四层防护：自动登录 + 密码回退 + watchdog 检测 + 进程守护 |
 
@@ -17,6 +19,8 @@
 QQ群 ──→ NapCatQQ ──WS──→ NoneBot2
                               ├── image_classifier → YOLOv8 → 本地存储
                               ├── llm_chat → DeepSeek API
+                              │     ├── memory → sqlite 长期记忆（AI 蒸馏群友画像/群事件）
+                              │     ├── web_search → 免费搜索 (Function Calling)
                               │     └── vision → GLM 视觉 API + CLIP/OCR 本地预筛
                               └── watchdog → 心跳保活 + 掉线重启
 ```
@@ -148,6 +152,34 @@ mkdir knowledge
 | `VISION_CACHE_TTL` | 同图缓存秒数（省成本） | `3600` |
 
 **群内指令**：`/vision on` | `/vision off` | `/vision status`
+
+### 长期记忆（LLM 聊天）
+
+自动记录群友发言到 `data/memory.db`（sqlite，重启不丢），由**独立蒸馏模型**按"消息量 + 定时兜底"两种方式把原始消息提炼成群友画像与群事件，对话时自动注入上下文，让机器人记得群友的性格与态度。
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `LLM_MEMORY_ENABLED` | 长期记忆总开关 | `true` |
+| `MEMORY_DB_PATH` | 记忆数据库路径 | `data/memory.db` |
+| `MEMORY_PROVIDER` | 蒸馏模型 Provider（解耦，可换更便宜的模型） | `deepseek` |
+| `MEMORY_BASE_URL` | 蒸馏 API 地址（留空复用 DeepSeek） | 空 |
+| `MEMORY_API_KEY` | 蒸馏 API Key（留空复用 `DEEPSEEK_API_KEY`） | 空 |
+| `MEMORY_MODEL` | 蒸馏模型名 | `deepseek-chat` |
+| `MEMORY_DISTILL_THRESHOLD` | 每人累积多少条消息触发一次蒸馏 | `30` |
+| `MEMORY_DISTILL_INTERVAL` | 定时兜底蒸馏间隔（秒） | `1800` |
+
+### 联网搜索（LLM 聊天）
+
+通过 Function Calling 让模型按需搜索：只要不确定就搜索，一个引擎搜不到就换另一个；搜不到就如实说"查不到/不了解/不清楚"。模型可调用 `web_search_bing` / `web_search_duckduckgo` / `web_search_baidu` 三个函数。
+
+| 配置项 | 说明 | 默认值 |
+|--------|------|--------|
+| `LLM_WEB_SEARCH_ENABLED` | 联网搜索总开关 | `true` |
+| `SEARCH_ENGINE` | 默认搜索方式：`bing` / `duckduckgo` / `baidu` | `bing` |
+| `SEARCH_RESULT_COUNT` | 每个搜索函数最多返回条数 | `5` |
+| `SEARCH_TIMEOUT` | 单次搜索超时（秒） | `8` |
+
+> 说明：搜索为免费 HTML 抓取（必应中文友好）。若某个引擎反爬或超时，机器人会自动如实回复"查不到"，不会编造。
 
 **下载 CLIP 本地模型**（约 600MB，不入库）：
 
