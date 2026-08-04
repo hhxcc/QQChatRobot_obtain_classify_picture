@@ -11,6 +11,7 @@
 import asyncio
 import json
 import re
+import time
 import urllib.parse
 from typing import List, Optional
 
@@ -58,17 +59,21 @@ def build_search_tools(enabled: bool = True) -> List[dict]:
 
 
 class WebSearcher:
-    """免费搜索引擎封装"""
+    """免费搜索引擎封装（带内存缓存，同类问题短时间不重复搜）"""
 
     def __init__(
         self,
         engine: str = "bing",
         result_count: int = 5,
         timeout: float = 8.0,
+        cache_ttl: int = 300,
     ):
         self.engine = engine if engine in SUPPORTED_ENGINES else "bing"
         self.result_count = max(1, min(10, result_count))
         self.timeout = timeout
+        self.cache_ttl = max(0, cache_ttl)
+        # {(engine, query): (时间戳, results)}
+        self._cache: dict = {}
         self._client = httpx.AsyncClient(
             timeout=timeout,
             headers={
@@ -85,13 +90,26 @@ class WebSearcher:
     async def search(self, query: str, engine: Optional[str] = None) -> List[dict]:
         """执行搜索，返回 [{title, url, snippet}, ...]；失败/风控返回空列表。
 
-        引擎偶发反爬会返回空结果，自动重试一次再放弃。
+        - 命中缓存直接返回（TTL 内）
+        - 引擎偶发反爬会返回空结果，自动重试一次再放弃
+        - 记录耗时日志，便于定位慢在哪一步
         """
         engine = engine or self.engine
         if engine not in SUPPORTED_ENGINES:
             return []
+
+        # ── 缓存命中 ──
+        cache_key = (engine, query)
+        now = time.monotonic()
+        hit = self._cache.get(cache_key)
+        if hit and now - hit[0] < self.cache_ttl:
+            logger.info(f"[搜索] 缓存命中 | {engine} | q={query[:40]}")
+            return hit[1]
+
+        # ── 实际搜索 ──
         for attempt in range(2):
             try:
+                t0 = time.monotonic()
                 if engine == "bing":
                     results = await self._search_bing(query)
                 elif engine == "duckduckgo":
@@ -100,7 +118,12 @@ class WebSearcher:
                     results = await self._search_baidu(query)
                 else:
                     return []
+                logger.info(
+                    f"[搜索] {engine} 耗时{time.monotonic() - t0:.1f}s "
+                    f"命中{len(results)}条 | q={query[:40]}"
+                )
                 if results:
+                    self._cache[cache_key] = (time.monotonic(), results)
                     return results
                 await asyncio.sleep(0.5)
             except Exception as e:

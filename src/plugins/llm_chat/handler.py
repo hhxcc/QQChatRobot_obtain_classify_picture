@@ -108,10 +108,14 @@ async def _init_client():
         system_prompt=_plugin_config.llm_system_prompt,
         temperature=_plugin_config.llm_temperature,
         max_tokens=_plugin_config.llm_max_tokens,
+        timeout=_plugin_config.llm_timeout,
+        max_retries=_plugin_config.llm_max_retries,
     )
     logger.info(
         f"LLM 客户端已初始化: model={_plugin_config.deepseek_model}, "
-        f"max_history={_plugin_config.llm_max_history}"
+        f"max_history={_plugin_config.llm_max_history}, "
+        f"timeout={_plugin_config.llm_timeout}s, "
+        f"retries={_plugin_config.llm_max_retries}"
     )
     prompt_preview = _plugin_config.llm_system_prompt[:80].replace("\n", " ")
     logger.info(f"系统提示词: {prompt_preview}... ({len(_plugin_config.llm_system_prompt)} 字符)")
@@ -307,26 +311,39 @@ async def _call_llm(
             logger.debug(f"[LLM] 记忆命中 | group={group_id}")
 
         # ── 调用 LLM（优先带 Function Calling）──
+        # 超时已在 LLMClient 内部按"单次调用+重试"精细控制，这里只留安全上限防极端情况
         if _search_tools:
             reply = await asyncio.wait_for(
                 _llm_client.chat_with_tools(
                     messages, _search_tools, _handle_search_tool
                 ),
-                timeout=45.0,
+                timeout=150.0,
             )
             if reply is None:
-                # 工具路径失败（模型不支持 tools / 轮次超限等）→ 回退普通对话
+                # 工具路径失败（网络重试耗尽 / 模型不支持 tools 等）→ 回退普通对话。
+                # 追加提示，让人设如实说明"没搜到"，避免生成"帮你搜"的空头支票。
                 logger.warning(
                     f"[LLM] 工具路径无结果，回退普通对话 | group={group_id}"
                 )
+                fallback_messages = list(messages)
+                fallback_messages.append(
+                    {
+                        "role": "system",
+                        "content": (
+                            "（注意：刚才的联网搜索没有成功。如果用户之前请你搜索或查资料，"
+                            "请如实说你没搜到、不了解或网络不太好，不要假装已经搜索过，"
+                            "也不要编造搜索结果。）"
+                        ),
+                    }
+                )
                 reply = await asyncio.wait_for(
-                    _llm_client.chat(messages),
-                    timeout=15.0,
+                    _llm_client.chat(fallback_messages),
+                    timeout=100.0,
                 )
         else:
             reply = await asyncio.wait_for(
                 _llm_client.chat(messages),
-                timeout=15.0,
+                timeout=100.0,
             )
         return reply
     except asyncio.TimeoutError:

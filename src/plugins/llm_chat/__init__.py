@@ -162,6 +162,8 @@ async def on_startup():
                     system_prompt="你是记忆管理助手，只负责提炼与归纳，保持简洁客观。",
                     temperature=0.3,
                     max_tokens=512,
+                    timeout=plugin_config.llm_timeout,
+                    max_retries=plugin_config.llm_max_retries,
                 )
                 _memory_distiller = MemoryDistiller(
                     distill_client,
@@ -200,6 +202,7 @@ async def on_startup():
                 engine=plugin_config.search_engine,
                 result_count=plugin_config.search_result_count,
                 timeout=plugin_config.search_timeout,
+                cache_ttl=plugin_config.search_cache_ttl,
             )
             tools = build_search_tools(enabled=True)
             _set_web_searcher(_web_searcher)

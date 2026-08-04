@@ -129,6 +129,8 @@ mkdir knowledge
 | `LLM_TARGET_GROUPS` | LLM 启用的群号，`[]` 关闭 |
 | `LLM_TEMPERATURE` | 生成温度 0-2 |
 | `LLM_COOLDOWN_BASE` | 回复冷却基准秒数 |
+| `LLM_TIMEOUT` | 单次 LLM 请求超时（秒，默认 30），应对不稳定网络 |
+| `LLM_MAX_RETRIES` | 网络/超时类异常自动重试次数（默认 2） |
 
 ### 视觉功能（看图说话）
 
@@ -178,8 +180,9 @@ mkdir knowledge
 | `SEARCH_ENGINE` | 默认搜索方式：`bing` / `duckduckgo` / `baidu` | `bing` |
 | `SEARCH_RESULT_COUNT` | 每个搜索函数最多返回条数 | `5` |
 | `SEARCH_TIMEOUT` | 单次搜索超时（秒） | `8` |
+| `SEARCH_CACHE_TTL` | 搜索缓存秒数，同类问题短时间不重复搜 | `300` |
 
-> 说明：搜索为免费 HTML 抓取（必应中文友好）。若某个引擎反爬或超时，机器人会自动如实回复"查不到"，不会编造。
+> 说明：搜索为免费 HTML 抓取（必应中文友好）。若某个引擎反爬或超时，机器人会自动如实回复"查不到"，不会编造。LLM 请求自带超时 + 自动重试，可扛过校园网等不稳定网络的偶发抖动。
 
 **下载 CLIP 本地模型**（约 600MB，不入库）：
 

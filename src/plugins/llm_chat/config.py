@@ -38,6 +38,9 @@ class Config(BaseModel):
     llm_max_history: int = Field(default=20, ge=1, le=100)
     llm_temperature: float = Field(default=0.8, ge=0.0, le=2.0)
     llm_max_tokens: int = Field(default=512, ge=1, le=4096)
+    # 单次 LLM 请求超时（秒）与网络类异常重试次数（应对校园网等不稳定网络）
+    llm_timeout: float = Field(default=30.0, ge=5.0, le=180.0)
+    llm_max_retries: int = Field(default=2, ge=0, le=5)
 
     # ── 长期记忆 ──
     llm_memory_enabled: bool = Field(default=True)
@@ -59,6 +62,8 @@ class Config(BaseModel):
     search_engine: str = Field(default="bing")
     search_result_count: int = Field(default=5, ge=1, le=10)
     search_timeout: float = Field(default=8.0)
+    # 搜索缓存 TTL（秒）：同类问题短时间不重复搜，省时间省流量
+    search_cache_ttl: int = Field(default=300, ge=0, le=3600)
 
     class Config:
         extra = "ignore"
