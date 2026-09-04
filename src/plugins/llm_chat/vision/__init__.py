@@ -17,6 +17,7 @@ from .config import VisionConfig
 from .decision import VisionDecisionMaker, VisionDecision
 from .glm_provider import GLMVisionProvider
 from .local_vision import LocalMeta, LocalVision
+from .ollama_provider import OllamaVisionProvider
 from .provider import ImageDescription, VisionProvider
 from .service import VisionService
 
@@ -26,6 +27,7 @@ __all__ = [
     "VisionProvider",
     "ImageDescription",
     "GLMVisionProvider",
+    "OllamaVisionProvider",
     "LocalVision",
     "LocalMeta",
     "VisionDecisionMaker",
