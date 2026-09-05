@@ -642,7 +642,12 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
             buf_text = "\n".join(m["formatted"] for m in buf)
             history.append({"role": "user", "content": buf_text})
             _message_buffer[group_id] = []
-        history.append({"role": "user", "content": formatted})
+        # 关键：把「被 @」这个信号拼进消息文本。
+        # 否则模型只看到纯文字，不知道有人点名自己，会按人格规则误判“无关”而回 [SKIP]。
+        user_msg = (
+            f"{formatted}\n（有人在群里@了你，正直接和你说话，请回应他）"
+        )
+        history.append({"role": "user", "content": user_msg})
 
         reply = await _call_llm(group_id, history, active_qq=event.user_id)
         did_reply = await _send_if_valid(bot, group_id, reply, history)
