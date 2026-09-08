@@ -14,6 +14,8 @@ class VisionConfig(BaseModel):
     api_key: str = Field(default="")
     model: str = Field(default="glm-4.6v-flash")
     base_url: str = Field(default="https://open.bigmodel.cn/api/paas/v4")
+    # 本地 Ollama: 是否允许模型思考（默认开；true=复杂图更准但更慢，false=更快更稳）
+    ollama_think: bool = Field(default=True)
     timeout: float = Field(default=15.0)
 
     # 本地预筛
@@ -50,6 +52,9 @@ class VisionConfig(BaseModel):
                 )
             ),
             timeout=float(getattr(driver_config, "vision_timeout", 15.0)),
+            ollama_think=bool(
+                getattr(driver_config, "vision_ollama_think", True)
+            ),
             clip_enabled=bool(getattr(driver_config, "vision_clip_enabled", True)),
             clip_threshold=float(
                 getattr(driver_config, "vision_clip_threshold", 0.6)

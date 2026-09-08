@@ -87,6 +87,7 @@ class VisionService:
                 base_url=base_url,
                 # 本地冷启动/推理较慢，放宽超时
                 timeout=max(self._config.timeout, 120.0),
+                think=self._config.ollama_think,
             )
 
         api_key = self._config.api_key

@@ -156,6 +156,7 @@ VISION_MODEL=qwen3.5:4B               # 需先 ollama pull
 VISION_BASE_URL=http://localhost:11434 # 远程 Ollama 填其地址
 VISION_API_KEY=                         # 本地无需 Key
 VISION_TIMEOUT=120                      # 本地冷启动较慢
+VISION_OLLAMA_THINK=true                # 允许模型思考(默认开,复杂图更准但更慢;false=更快更稳)
 ```
 
 **群内指令**：`/vision on` | `/vision off` | `/vision status`
