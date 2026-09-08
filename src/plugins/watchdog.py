@@ -104,7 +104,7 @@ async def on_bot_disconnect(bot: Bot):
         _heartbeat_task.cancel()
         _heartbeat_task = None
 
-    # 不立即退出，给 NapCat 60 秒时间重连
+    # 不立即退出，给协议端(SnowLuma)60 秒时间重连
     # 如果 60 秒内重连成功，on_bot_connect 会取消此任务
     if _exit_task and not _exit_task.done():
         _exit_task.cancel()

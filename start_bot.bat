@@ -1,26 +1,33 @@
 @echo off
+chcp 65001 >nul
 setlocal enabledelayedexpansion
-title QQ Chat Robot - Daemon Mode
+title QQ Chat Robot - Daemon Mode (SnowLuma)
 cd /d "%~dp0"
 
 echo ========================================
-echo   QQ Chat Robot - Daemon Mode
+echo   QQ Chat Robot - Daemon Mode (SnowLuma)
 echo ========================================
 echo.
 
-set NAPCAT_DIR=%~dp0tools\NapCatQQ
+set "SNOWLUMA_DIR=%~dp0tools\SnowLuma"
+set "SNOWLUMA_NODE=%SNOWLUMA_DIR%\node.exe"
+set "SNOWLUMA_ENTRY=%SNOWLUMA_DIR%\index.mjs"
+set "QQEXEDIR="
 set RESTART_COUNT=0
-set NAPCAT_RESTART_COUNT=0
-set NAPCAT_MAX_UPTIME=180
+for /f "tokens=2*" %%a in ('reg query "HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\QQ" /v "UninstallString" 2^>nul') do set "QQEXEDIR=%%~dpb"
 
-:: Main loop
+:: Main loop (守护 bot.py;崩溃自动重启)
+:: 说明: 不再定时强杀 QQ。掉线自愈交给:
+::   - SnowLuma 主进程 (WS 心跳 + 自动重连)
+::   - SnowLuma 自动注入 (SNOWLUMA_HOOK_AUTOLOAD=1)
+::   - watchdog 插件 (登录失效 → bot 退出 → 本脚本重启)
 :main_loop
 
-:: --- Clean up stale timer processes ---
-taskkill /FI "WINDOWTITLE eq NapCatTimer" /F >nul 2>&1
+:: --- 确保 QQ 进程在线 (可拉起;失败则提示) ---
+call :ensure_qq
 
-:: --- Check and start NapCatQQ ---
-call :ensure_napcat
+:: --- 确保 SnowLuma 主进程 (带自动注入) ---
+call :ensure_snowluma
 
 :: --- Start Bot ---
 set /a RESTART_COUNT+=1
@@ -39,63 +46,66 @@ goto main_loop
 
 
 :: =============================================
-:: Ensure NapCatQQ is running (with retry)
+:: Ensure QQ 在线
 :: =============================================
-:ensure_napcat
+:ensure_qq
 tasklist /FI "IMAGENAME eq QQ.exe" 2>NUL | find /I "QQ.exe" >NUL
-if %errorlevel% equ 0 (
-    echo [Check] QQ.exe running
-    exit /b 0
-)
+if errorlevel 1 goto qq_absent
+echo [Check] QQ.exe running
+exit /b 0
 
-:: QQ.exe not found, start NapCat
-set /a NAPCAT_RESTART_COUNT+=1
-echo [NapCat #%NAPCAT_RESTART_COUNT%] Starting NapCatQQ...
+:qq_absent
+if not defined QQEXEDIR goto qq_no_path
+if not exist "%QQEXEDIR%QQ.exe" goto qq_no_path
+echo [QQ] QQ.exe 未运行, 尝试拉起...
+start "" "%QQEXEDIR%QQ.exe"
+set /a qqwait=0
 
-:: Launch NapCat in its own directory
-start "NapCatQQ" /D "%NAPCAT_DIR%" cmd /c launcher-user.bat
-
-:: Wait for QQ.exe to appear (poll process list)
-set /a count=0
 :wait_qq
 timeout /t 2 /nobreak >nul
-set /a count+=2
 tasklist /FI "IMAGENAME eq QQ.exe" 2>NUL | find /I "QQ.exe" >NUL
-if %errorlevel% equ 0 goto napcat_ok
-if %count% lss 30 goto wait_qq
-
-:: QQ.exe didn't appear, retry once
-echo   Retrying NapCatQQ launch...
-taskkill /FI "WINDOWTITLE eq NapCatQQ" /F >nul 2>&1
-start "NapCatQQ" /D "%NAPCAT_DIR%" cmd /c launcher-user.bat
-set /a count=0
-:wait_qq2
-timeout /t 2 /nobreak >nul
-set /a count+=2
-tasklist /FI "IMAGENAME eq QQ.exe" 2>NUL | find /I "QQ.exe" >NUL
-if %errorlevel% equ 0 goto napcat_ok
-if %count% lss 30 goto wait_qq2
-echo   WARNING: NapCatQQ failed to start
+if not errorlevel 1 goto qq_started
+set /a qqwait+=2
+if %qqwait% lss 30 goto wait_qq
+echo [QQ] 拉起超时, 请手动启动并登录机器人小号 QQ
 exit /b 0
 
-:napcat_ok
-:: Wait for WebUI to be ready
-echo   Waiting for NapCatQQ WebUI...
-set /a count=0
+:qq_started
+echo [QQ] QQ.exe 已启动
+exit /b 0
+
+:qq_no_path
+echo [QQ] 未找到 QQ 安装路径, 请手动启动并登录机器人小号 QQ
+exit /b 0
+
+
+:: =============================================
+:: Ensure SnowLuma 主进程 (SNOWLUMA_HOOK_AUTOLOAD=1)
+:: =============================================
+:ensure_snowluma
+powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:5099' -TimeoutSec 2 -UseBasicParsing; exit 0 } catch { exit 1 }" >nul 2>&1
+if not errorlevel 1 goto snowluma_ready
+if not exist "%SNOWLUMA_NODE%" goto snowluma_missing
+if not exist "%SNOWLUMA_ENTRY%" goto snowluma_missing
+
+echo [SnowLuma] 启动主进程 (自动注入开启)...
+set SNOWLUMA_HOOK_AUTOLOAD=1
+start "SnowLuma" /D "%SNOWLUMA_DIR%" "%SNOWLUMA_NODE%" "%SNOWLUMA_ENTRY%"
+
+set /a webwait=0
 :wait_webui
 timeout /t 2 /nobreak >nul
-set /a count+=2
-powershell -Command "try {$r=Invoke-WebRequest -Uri 'http://127.0.0.1:6099' -TimeoutSec 2 -UseBasicParsing;exit 0}catch{exit 1}" >nul 2>&1
-if %errorlevel% equ 0 goto napcat_ready
-if %count% lss 60 goto wait_webui
-echo   WARNING: NapCatQQ WebUI timeout
+powershell -NoProfile -Command "try { $r = Invoke-WebRequest -Uri 'http://127.0.0.1:5099' -TimeoutSec 2 -UseBasicParsing; exit 0 } catch { exit 1 }" >nul 2>&1
+if not errorlevel 1 goto snowluma_ready
+set /a webwait+=2
+if %webwait% lss 60 goto wait_webui
+echo [SnowLuma] WebUI 启动超时, 请检查 tools\SnowLuma
 exit /b 0
 
-:napcat_ready
-echo [Check] NapCatQQ ready
+:snowluma_ready
+echo [Check] SnowLuma WebUI ready
+exit /b 0
 
-:: Start the proactive restart timer
-set /a TIMER_SEC=%NAPCAT_MAX_UPTIME%*60
-start "NapCatTimer" /MIN powershell -WindowStyle Hidden -NoProfile -Command "Start-Sleep %TIMER_SEC%; taskkill /F /IM QQ.exe 2>$null"
-echo [Timer] Will restart NapCat in %NAPCAT_MAX_UPTIME% min
+:snowluma_missing
+echo [ERROR] 未找到 SnowLuma: %SNOWLUMA_DIR%
 exit /b 0

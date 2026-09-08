@@ -9,7 +9,7 @@ class VisionConfig(BaseModel):
     # 总开关（运行期可由 /vision 指令动态切换）
     enabled: bool = Field(default=False)
 
-    # 视觉模型 Provider（解耦：glm | qwen | openai | none）
+    # 视觉模型 Provider（解耦：glm | ollama | qwen | openai | none）
     provider: str = Field(default="glm")
     api_key: str = Field(default="")
     model: str = Field(default="glm-4.6v-flash")

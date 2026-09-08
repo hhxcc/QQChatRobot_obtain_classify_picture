@@ -21,6 +21,7 @@ from .config import VisionConfig
 from .decision import VisionDecisionMaker
 from .glm_provider import GLMVisionProvider
 from .local_vision import LocalMeta, LocalVision
+from .ollama_provider import OllamaVisionProvider
 from .provider import ImageDescription, VisionProvider
 
 # 熔断参数：连续失败达到阈值后，暂停视觉 API 调用一段时间
@@ -74,13 +75,26 @@ class VisionService:
 
     def _create_provider(self) -> Optional[VisionProvider]:
         """按配置实例化视觉 Provider（解耦点：换模型在此扩展）"""
+        provider_type = (self._config.provider or "glm").lower()
+
+        # 本地 Ollama：走原生 /api/chat，无需 API Key
+        if provider_type == "ollama":
+            base_url = self._config.base_url
+            if not base_url or base_url == "https://open.bigmodel.cn/api/paas/v4":
+                base_url = "http://localhost:11434"
+            return OllamaVisionProvider(
+                model=self._config.model or "qwen3.5:4B",
+                base_url=base_url,
+                # 本地冷启动/推理较慢，放宽超时
+                timeout=max(self._config.timeout, 120.0),
+            )
+
         api_key = self._config.api_key
         if not api_key or api_key in ("your-api-key-here", "sk-xxxxxxxx"):
             logger.warning(
                 "[Vision] VISION_API_KEY 未配置或为占位值，视觉 API 不可用"
             )
             return None
-        provider_type = (self._config.provider or "glm").lower()
         if provider_type == "glm":
             return GLMVisionProvider(
                 api_key=api_key,
@@ -88,7 +102,7 @@ class VisionService:
                 base_url=self._config.base_url,
                 timeout=self._config.timeout,
             )
-        # 未来扩展：qwen / openai 等
+        # 未来扩展：qwen / openai 等（OpenAI 兼容，可复用 GLM provider）
         logger.warning(f"[Vision] 未知 Provider 类型: {provider_type}，使用 GLM")
         return GLMVisionProvider(
             api_key=api_key,
