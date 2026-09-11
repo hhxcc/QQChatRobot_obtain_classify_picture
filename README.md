@@ -10,7 +10,7 @@
 | 💬 LLM 聊天 | DeepSeek API 驱动，支持人格注入和知识库检索 |
 | 🧠 长期记忆 | sqlite 持久化，AI 自动蒸馏群友画像/群事件，重启不丢 |
 | 🔎 联网搜索 | Function Calling 按需搜索百科/网络，搜不到如实回答 |
-| 👁️ 看图对话 | 本地 Ollama / 云端 GLM 视觉 + CLIP/OCR 本地预筛，按人设回应 |
+| 👁️ 看图对话 | 云端 GLM / 本地 Ollama 视觉描述，或**直接交多模态大模型端到端看图回复**；均叠加 CLIP/OCR 本地预筛 |
 | 🛡️ 防掉线 | SnowLuma 协议端(自动注入+WS 自愈) + watchdog 心跳 + 守护进程重启 |
 
 ## 架构
@@ -131,10 +131,30 @@ mkdir knowledge
 
 两种模式均叠加 CLIP/OCR 本地预筛（零成本过滤）。
 
+**视觉回复模式**（`LLM_VISION_MODE`）——决定图片如何进入对话：
+
+| 模式 | 流程 | 适用 |
+|------|------|------|
+| `describe`（默认） | 视觉模型先输出结构化描述 → 作为文本交聊天模型回复 | 聊天模型**不支持图像**时；想省 token |
+| `direct` | 图片**直接**交支持多模态的聊天模型，端到端看图回复（无损、一步） | 聊天模型支持图像（如 `deepseek-flash`） |
+
+> `direct` 仍保留 CLIP/OCR 预筛：只有"值得看图"的图片才会带上图像 token，避免每张群图都直发主模型。
+> ⚠️ `direct` 要求 `DEEPSEEK_MODEL` 为支持图像的模型（如 `deepseek-flash`），否则看图会失败。图片会在发送前自动缩放到长边 ≤1024 并转 base64；每轮最多携带 `LLM_VISION_MAX_IMAGES` 张；图片仅注入本轮请求，**不写入历史**（避免上下文膨胀）。
+
+**direct 端到端示例**（`.env`）：
+
+```env
+DEEPSEEK_MODEL=deepseek-flash     # 支持图像理解
+LLM_VISION_MODE=direct
+LLM_VISION_MAX_IMAGES=2
+```
+
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
 | `LLM_VISION_ENABLED` | 视觉功能总开关 | `false` |
-| `VISION_PROVIDER` | 视觉 Provider（`glm` \| `ollama`） | `glm` |
+| `LLM_VISION_MODE` | 视觉回复模式（`describe` \| `direct`） | `describe` |
+| `LLM_VISION_MAX_IMAGES` | `direct` 模式下单条请求最多携带图片数 | `2` |
+| `VISION_PROVIDER` | 视觉 Provider（`glm` \| `ollama`，仅 `describe` 模式使用） | `glm` |
 | `VISION_API_KEY` | 云端 Key（智谱开放平台）；本地 ollama 留空 | 空 |
 | `VISION_MODEL` | 视觉模型名 | `glm-4v-flash` |
 | `VISION_BASE_URL` | API 地址 | `https://open.bigmodel.cn/api/paas/v4` |

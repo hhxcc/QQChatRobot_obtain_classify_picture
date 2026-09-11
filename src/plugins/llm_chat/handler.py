@@ -1,6 +1,8 @@
 """群消息处理器 - 监听文字消息并交由 LLM 决策回复"""
 
 import asyncio
+import base64
+import io
 import time
 from collections import defaultdict, deque
 from typing import Dict, Set
@@ -254,11 +256,16 @@ async def _call_llm(
     group_id: int,
     history: deque,
     active_qq: int | None = None,
+    images: list[str] | None = None,
 ) -> str | None:
     """调用 LLM，返回回复文本或 None。
 
     自动注入: 知识库检索 + 场景检测(P3) + 长期记忆。
     若启用了联网搜索，则通过 Function Calling 让模型按需搜索。
+
+    Args:
+        images: direct 端到端模式下本轮携带的图片 data URL 列表。
+                仅注入到本轮请求的最后一条 user 消息（不写入历史，避免上下文膨胀）。
     """
     _in_flight.add(group_id)
     try:
@@ -309,6 +316,27 @@ async def _call_llm(
         if memory_context:
             messages.insert(0, {"role": "system", "content": memory_context})
             logger.debug(f"[LLM] 记忆命中 | group={group_id}")
+
+        # ── direct 端到端模式：把图片注入本轮最后一条 user 消息 ──
+        # 仅修改请求用的 messages 副本，不写回 history，避免历史累积大体积 base64
+        if images:
+            for i in range(len(messages) - 1, -1, -1):
+                if messages[i].get("role") == "user":
+                    txt = messages[i].get("content")
+                    if not isinstance(txt, str):
+                        txt = ""
+                    parts: list[dict] = [
+                        {"type": "text", "text": txt or "（对方发来一张图片）"}
+                    ]
+                    parts.extend(
+                        {"type": "image_url", "image_url": {"url": u}}
+                        for u in images
+                    )
+                    messages[i] = {"role": "user", "content": parts}
+                    break
+            logger.info(
+                f"[LLM] direct 视觉 | group={group_id} | 携带 {len(images)} 张图"
+            )
 
         # ── 调用 LLM（优先带 Function Calling）──
         # 超时已在 LLMClient 内部按"单次调用+重试"精细控制，这里只留安全上限防极端情况
@@ -404,12 +432,14 @@ async def _process_and_reply(
     history: deque,
     skip_local_check: bool = False,
     active_qq: int | None = None,
+    images: list[str] | None = None,
 ):
     """处理消息并回复（CD 到期后的核心逻辑，供正常流程和延迟刷新复用）
 
     Args:
         skip_local_check: 是否跳过本地预判（纯图片消息已由视觉决策把关，直接调 LLM）
         active_qq: 当前对话对象的 QQ（用于长期记忆注入）
+        images: direct 端到端模式下本轮携带的图片 data URL 列表
     """
     in_conv = _in_conversation(group_id)
     if (
@@ -422,7 +452,7 @@ async def _process_and_reply(
         _last_action_time[group_id] = time.time()
         return
     history.append({"role": "user", "content": combined})
-    reply = await _call_llm(group_id, history, active_qq=active_qq)
+    reply = await _call_llm(group_id, history, active_qq=active_qq, images=images)
     did_reply = await _send_if_valid(bot, group_id, reply, history)
     _update_cd(group_id, did_reply)
 
@@ -452,6 +482,12 @@ def _schedule_flush(group_id: int, delay: float, bot: Bot):
         all_pure_image = all(m.get("pure_image", False) for m in buf)
         # 取最后一条消息的发送者作为记忆注入对象
         active_qq = buf[-1].get("qq") if buf else None
+        # 合并本批消息携带的图片（direct 模式），限制上限
+        _max_img = getattr(_plugin_config, "llm_vision_max_images", 2)
+        _imgs: list[str] = []
+        for m in buf:
+            _imgs.extend(m.get("images", []))
+        _imgs = _imgs[:_max_img]
         _message_buffer[group_id] = []
         combined = "\n".join(lines)
         logger.info(
@@ -460,6 +496,7 @@ def _schedule_flush(group_id: int, delay: float, bot: Bot):
         await _process_and_reply(
             bot, group_id, combined, history,
             skip_local_check=all_pure_image, active_qq=active_qq,
+            images=_imgs,
         )
 
     _pending_flush[group_id] = asyncio.create_task(_delayed())
@@ -476,6 +513,85 @@ def _clear_group_state(group_id: int):
 # ── 事件处理器 ──
 
 group_msg = on_message(rule=Rule(lambda event: isinstance(event, GroupMessageEvent)))
+
+
+_IMAGE_MAX_SIDE = 1024          # 图片长边上限（控制 base64 体积与 token）
+_IMAGE_JPEG_QUALITY = 88
+
+
+def _encode_image_data_url(img_bytes: bytes) -> str | None:
+    """把图片字节缩放后编码为 data URL（供多模态 messages 使用）。
+
+    失败（解码/编码异常或缺少 Pillow）返回 None。
+    """
+    try:
+        from PIL import Image
+    except Exception:
+        logger.warning("[Vision] 未安装 Pillow，无法编码图片")
+        return None
+    try:
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+    except Exception as e:
+        logger.warning(f"[Vision] 图片解码失败: {e}")
+        return None
+    w, h = img.size
+    if max(w, h) > _IMAGE_MAX_SIDE:
+        s = _IMAGE_MAX_SIDE / max(w, h)
+        img = img.resize((max(1, int(w * s)), max(1, int(h * s))))
+    buf = io.BytesIO()
+    try:
+        img.save(buf, format="JPEG", quality=_IMAGE_JPEG_QUALITY)
+    except Exception as e:
+        logger.warning(f"[Vision] 图片编码失败: {e}")
+        return None
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/jpeg;base64,{b64}"
+
+
+async def _collect_direct_images(
+    image_segments: list,
+    *,
+    is_mentioned: bool,
+    has_text: bool,
+) -> tuple[list[str], bool]:
+    """direct 模式：下载图片 → 本地预筛(CLIP/OCR) → 编码为多模态 data URL。
+
+    保留预筛：只把“值得看图”的图片交给聊天模型，避免每张群图都消耗图像 token。
+
+    Returns:
+        (images, any_pass): images=通过预筛的图片 data URL 列表；
+        any_pass=是否至少有一张图通过预筛（决定纯图消息是否值得回复）
+    """
+    vision = get_vision()
+    if vision is None or not vision.enabled:
+        return [], False
+
+    max_n = getattr(_plugin_config, "llm_vision_max_images", 2)
+    images: list[str] = []
+    any_pass = False
+    for seg in image_segments[:max_n]:
+        url = seg.data.get("url", "")
+        if not url:
+            continue
+        try:
+            img_bytes = await vision.download_image(url, timeout=15)
+        except Exception as e:
+            logger.warning(f"[Vision] 图片下载失败: {e}")
+            continue
+        try:
+            should, _local = await vision.screen_image(
+                img_bytes, is_mentioned=is_mentioned, has_text=has_text
+            )
+        except Exception as e:
+            logger.warning(f"[Vision] 预筛失败，按放行处理: {e}")
+            should = True
+        if not should:
+            continue
+        data_url = _encode_image_data_url(img_bytes)
+        if data_url:
+            images.append(data_url)
+            any_pass = True
+    return images, any_pass
 
 
 async def _build_image_context(
@@ -584,21 +700,37 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
     # ── 视觉：构建图片上下文（有图且视觉开启时）──
     image_context = ""
     pure_image = False
+    direct_images: list[str] = []
     vision = get_vision()
+    direct_mode = (
+        str(getattr(_plugin_config, "llm_vision_mode", "describe")).lower()
+        == "direct"
+    )
     if (
         image_segments
         and vision
         and vision.enabled
         and not raw_text_original.startswith("/")
     ):
-        image_context = await _build_image_context(
-            bot,
-            event,
-            image_segments,
-            is_mentioned=_is_mentioned(event),
-            has_text=bool(raw_text_original),
-            text=raw_text_original,
-        )
+        if direct_mode:
+            # 端到端：不调视觉描述 API，图片直接进聊天模型
+            direct_images, any_pass = await _collect_direct_images(
+                image_segments,
+                is_mentioned=_is_mentioned(event),
+                has_text=bool(raw_text_original),
+            )
+            # 纯图且预筛通过 → 给一个占位提示作为消息主体
+            if not raw_text_original and any_pass:
+                image_context = "[对方发来一张图片]"
+        else:
+            image_context = await _build_image_context(
+                bot,
+                event,
+                image_segments,
+                is_mentioned=_is_mentioned(event),
+                has_text=bool(raw_text_original),
+                text=raw_text_original,
+            )
 
     # 纯图片消息：以图片上下文为消息主体（跳过本地预判，由视觉决策把关）
     if not raw_text_original:
@@ -649,7 +781,9 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         )
         history.append({"role": "user", "content": user_msg})
 
-        reply = await _call_llm(group_id, history, active_qq=event.user_id)
+        reply = await _call_llm(
+            group_id, history, active_qq=event.user_id, images=direct_images
+        )
         did_reply = await _send_if_valid(bot, group_id, reply, history)
         # @mention 回复后将 CD 重置为基准值
         _current_cd[group_id] = _plugin_config.llm_cooldown_base
@@ -668,6 +802,7 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
                 "text": raw_text,
                 "formatted": formatted,
                 "pure_image": pure_image,
+                "images": direct_images,
                 "qq": event.user_id,
             }
         )
@@ -690,6 +825,16 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         buf = _message_buffer.get(group_id, [])
         _message_buffer[group_id] = []
 
+        # 合并本批消息携带的图片（direct 模式），限制上限
+        _max_img = getattr(_plugin_config, "llm_vision_max_images", 2)
+        if buf:
+            _buf_imgs: list[str] = []
+            for m in buf:
+                _buf_imgs.extend(m.get("images", []))
+            direct_images = (_buf_imgs + direct_images)[:_max_img]
+        else:
+            direct_images = direct_images[:_max_img]
+
         if buf:
             lines = [m["formatted"] for m in buf]
             lines.append(formatted)
@@ -708,6 +853,7 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
         await _process_and_reply(
             bot, group_id, combined, history,
             skip_local_check=pure_image, active_qq=event.user_id,
+            images=direct_images,
         )
     else:
         # ── 情况②/④: CD 未到期 → 消息进缓冲区 ──
@@ -717,6 +863,7 @@ async def handle_group_message(bot: Bot, event: GroupMessageEvent):
                 "text": raw_text,
                 "formatted": formatted,
                 "pure_image": pure_image,
+                "images": direct_images,
                 "qq": event.user_id,
             }
         )

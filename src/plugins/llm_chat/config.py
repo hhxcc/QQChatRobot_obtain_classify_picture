@@ -34,6 +34,13 @@ class Config(BaseModel):
     # 消息缓冲区：CD 期间暂存消息，CD 到期后一起发给 LLM
     llm_buffer_max: int = Field(default=15, ge=1, le=50)
 
+    # ── 视觉回复模式 ──
+    # describe=视觉模型先出结构化描述，再交聊天模型（省 token，两步）
+    # direct  =图片直接交给支持多模态的聊天模型，端到端看图回复（无损，一步）
+    llm_vision_mode: str = Field(default="describe")
+    # direct 模式下单条请求最多携带的图片数（控制 token 与耗时）
+    llm_vision_max_images: int = Field(default=2, ge=1, le=5)
+
     # 上下文控制
     llm_max_history: int = Field(default=20, ge=1, le=100)
     llm_temperature: float = Field(default=0.8, ge=0.0, le=2.0)

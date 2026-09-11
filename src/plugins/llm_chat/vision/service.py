@@ -219,6 +219,45 @@ class VisionService:
         )
         return desc, local_meta
 
+    async def screen_image(
+        self,
+        image_bytes: bytes,
+        *,
+        is_mentioned: bool = False,
+        has_text: bool = False,
+    ) -> Tuple[bool, Optional[LocalMeta]]:
+        """仅执行本地预筛（CLIP + OCR）+ 决策，**不调用视觉 API**。
+
+        用于 direct 端到端模式：由预筛判断“这张图是否值得交给多模态聊天模型”，
+        由聊天模型自己看图回复，省去“视觉模型先出描述”的一步。
+
+        Returns:
+            (是否值得分析, 本地预筛结果)
+        """
+        await self.ensure_loaded()
+
+        local_meta: Optional[LocalMeta] = None
+        if self._local and self._local.is_ready:
+            try:
+                local_meta = await self._local.analyze(image_bytes)
+            except Exception as e:
+                logger.error(f"[Vision] 本地预筛异常: {e}")
+
+        # 无决策器 → 默认放行（宁可多带一张，也不要漏看）
+        if self._decision is None:
+            return True, local_meta
+
+        decision = self._decision.decide(
+            is_mentioned=is_mentioned,
+            has_text=has_text,
+            clip_category=local_meta.clip_category if local_meta else "其他",
+            clip_conf=local_meta.clip_conf if local_meta else 0.0,
+        )
+        logger.debug(
+            f"[Vision] direct 预筛={decision.should_analyze} | {decision.reason}"
+        )
+        return decision.should_analyze, local_meta
+
     # ── 熔断辅助 ──
 
     def _record_failure(self):
